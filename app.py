@@ -119,7 +119,9 @@ def resolve_tax_report_enum() -> TaxReportEnum:
     )
 
 
-def select_and_submit_files(tax_report_enum: TaxReportEnum) -> None:
+def select_and_submit_files(
+    tax_report_enum: TaxReportEnum,
+) -> TaxReportEntry | None:
     files = st.file_uploader(
         "Reports (min. 1)",
         key=f"selected_tax_report_files_{st.session_state.session_index}",
@@ -128,16 +130,16 @@ def select_and_submit_files(tax_report_enum: TaxReportEnum) -> None:
     if files:
         st.markdown("</br>", unsafe_allow_html=True)
         if st.button("Submit"):
-            tax_report_entry = TaxReportEntry(
+            return TaxReportEntry(
                 tax_report_enum=tax_report_enum,
                 tax_report_data=files,
             )
-            st.session_state.tax_report_entries.append(tax_report_entry)
-            st.session_state.session_index += 1
-            st.rerun()
+    return None
 
 
-def select_and_submit_manual(tax_report_enum: TaxReportEnum) -> None:
+def select_and_submit_manual(
+    tax_report_enum: TaxReportEnum,
+) -> TaxReportEntry | None:
     c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
     with c1:
         current_year = date.today().year
@@ -259,16 +261,14 @@ def select_and_submit_manual(tax_report_enum: TaxReportEnum) -> None:
                 "social_security_contributions": social_security_contributions,
                 "donations": donations,
             }
-            tax_report_entry = TaxReportEntry(
+            return TaxReportEntry(
                 tax_report_enum=tax_report_enum,
                 tax_report_data={
                     "year": int(year),
                     "tax_data": tax_data,
                 },
             )
-            st.session_state.tax_report_entries.append(tax_report_entry)
-            st.session_state.session_index += 1
-            st.rerun()
+    return None
 
 
 def display_tax_report_entries() -> None:
@@ -299,10 +299,14 @@ def display_tax_report_entries() -> None:
         with dg3:
             if st.button("Delete", key=i):
                 st.session_state.tax_report_entries.pop(i)
+                summarize_tax_reports()
                 st.rerun()
 
 
 def summarize_tax_reports() -> None:
+    if not st.session_state.tax_report_entries:
+        st.session_state.table = None
+        return
     tax_report = TaxReport()
     for tax_report_entry in st.session_state.tax_report_entries:
         tax_report_entry = cast(TaxReportEntry, tax_report_entry)
@@ -331,20 +335,23 @@ def main() -> None:
     tax_report_enum = resolve_tax_report_enum()
     match tax_report_enum.to_type():
         case TaxReportType.PLACEHOLDER:
-            pass
+            tax_report_entry = None
         case TaxReportType.FILES:
-            select_and_submit_files(tax_report_enum)
+            tax_report_entry = select_and_submit_files(tax_report_enum)
         case TaxReportType.MANUAL:
-            select_and_submit_manual(tax_report_enum)
+            tax_report_entry = select_and_submit_manual(tax_report_enum)
         case _ as unknown:
             raise ValueError(f"Unknown TaxReportType: {unknown}")
+    if tax_report_entry is not None:
+        st.session_state.tax_report_entries.append(tax_report_entry)
+        st.session_state.session_index += 1
+        summarize_tax_reports()
+        st.rerun()
     if st.session_state.tax_report_entries:
         st.markdown("</br>", unsafe_allow_html=True)
         st.markdown("### Submitted Tax Reports:</br>", unsafe_allow_html=True)
         display_tax_report_entries()
         st.markdown("</br>", unsafe_allow_html=True)
-        if st.button("Summarize"):
-            summarize_tax_reports()
     if st.session_state.table is not None:
         st.markdown("</br>", unsafe_allow_html=True)
         st.dataframe(st.session_state.table)
