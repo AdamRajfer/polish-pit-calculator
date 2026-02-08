@@ -60,11 +60,6 @@ class SchwabEmployeeSponsoredTaxReporter(TaxReporter):
         reports: list[pd.DataFrame] = []
         for arg in self.args:
             report = pd.read_csv(arg)
-            if reports:
-                pd.testing.assert_index_equal(
-                    report.columns, reports[-1].columns, check_order=False
-                )
-                report = report[reports[-1].columns]
             reports.append(report)
         reports = sorted(
             reports,

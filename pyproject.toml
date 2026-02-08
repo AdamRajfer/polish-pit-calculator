@@ -1,21 +1,21 @@
-[tool.poetry]
+[project]
 name = "polish-pit-calculator"
 version = "1.0.0"
 description = "Tool for generating content for Polish PIT forms."
-authors = ["Adam Rajfer <adam.rajfer@gmail.com>"]
-packages = [
-    { include = "polish_pit_calculator" }
+authors = [
+    { name = "Adam Rajfer", email = "adam.rajfer@gmail.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "pandas>=2.0,<3",
+    "scipy>=1.10,<2",
+    "streamlit>=1.28,<2",
 ]
 
-[tool.poetry.dependencies]
-python = "^3.10"
-pandas = "*"
-scipy = "*"
-streamlit = "*"
-
-[build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+[project.optional-dependencies]
+dev = [
+    "pre-commit>=3.7,<4",
+]
 
 [tool.black]
 line-length = 79

@@ -5,7 +5,7 @@ Tool for generating content for Polish PIT forms.
 ## 1. Installation
 
 ```bash
-poetry install
+uv sync
 ```
 
 ## 2. Usage
