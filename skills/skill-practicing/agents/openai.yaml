@@ -1,0 +1,4 @@
+interface:
+  display_name: "Skill Practicing"
+  short_description: "Enforce consistent skill usage and repository hygiene."
+  default_prompt: "Use this skill when creating or updating agent instructions, skills, and documentation hygiene workflows."

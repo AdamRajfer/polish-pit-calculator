@@ -1,3 +1,5 @@
+"""Interactive Brokers Flex Query XML reporter implementation."""
+
 import time
 import urllib.parse
 import urllib.request
@@ -7,24 +9,29 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 
 from src.config import TaxRecord, TaxReport, TaxReporter
-from src.utils import fetch_exchange_rates, get_exchange_rate
+from src.utils import get_exchange_rate
 
 
 class IBFlexQueryTaxReporter(TaxReporter):
+    """Generate tax records from IB Flex Query API responses."""
+
     SEND_REQUEST_URL = (
-        "https://ndcdyn.interactivebrokers.com/"
-        "AccountManagement/FlexWebService/SendRequest"
+        "https://ndcdyn.interactivebrokers.com/AccountManagement/" + "FlexWebService/SendRequest"
     )
     DEFAULT_GET_STATEMENT_URL = (
-        "https://gdcdyn.interactivebrokers.com/"
-        "AccountManagement/FlexWebService/GetStatement"
+        "https://gdcdyn.interactivebrokers.com/AccountManagement/" + "FlexWebService/GetStatement"
     )
     EMPTY_STATEMENT_XML = (
-        "<FlexQueryResponse><FlexStatements count='0'>"
-        "</FlexStatements></FlexQueryResponse>"
+        "<FlexQueryResponse><FlexStatements count='0'></FlexStatements>" + "</FlexQueryResponse>"
     )
 
+    def __init__(self, query_id: str, token: str) -> None:
+        """Store Flex Query id and API token."""
+        self.query_id = str(query_id).strip()
+        self.token = token.strip()
+
     def generate(self) -> TaxReport:
+        """Build yearly tax report from trades and cash transactions."""
         trades: list[dict[str, str]] = []
         cash: list[dict[str, str]] = []
         for statement_trades, statement_cash in self._iter_statement_entries():
@@ -68,20 +75,19 @@ class IBFlexQueryTaxReporter(TaxReporter):
                 trade_revenue=float(trade_revenue.get(year, 0.0)),
                 trade_cost=float(trade_cost.get(year, 0.0)),
                 foreign_interest=float(interest_income.get(year, 0.0)),
-                foreign_interest_withholding_tax=float(
-                    interest_wtax.get(year, 0.0)
-                ),
+                foreign_interest_withholding_tax=float(interest_wtax.get(year, 0.0)),
             )
         return report
 
     def _iter_statement_entries(self):
+        """Iterate backward by year and yield parsed statement entries."""
         today = datetime.now().date()
         year = today.year
-        query_id = str(self.args[0]).strip()
-        token = str(self.args[1]).strip()
         seen_non_empty = False
         current_entries = self._resolve_current_year_entries(
-            query_id, token, today
+            self.query_id,
+            self.token,
+            today,
         )
 
         while True:
@@ -91,8 +97,8 @@ class IBFlexQueryTaxReporter(TaxReporter):
             else:
                 entries = self._parse_statement_entries(
                     self._fetch_statement_xml(
-                        query_id,
-                        token,
+                        self.query_id,
+                        self.token,
                         from_date.strftime("%Y%m%d"),
                         date(year, 12, 31).strftime("%Y%m%d"),
                     )
@@ -112,6 +118,7 @@ class IBFlexQueryTaxReporter(TaxReporter):
         token: str,
         today: date,
     ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        """Find latest available YTD snapshot for current year."""
         from_date = date(today.year, 1, 1)
         to_date = today
         fd = from_date.strftime("%Y%m%d")
@@ -130,9 +137,8 @@ class IBFlexQueryTaxReporter(TaxReporter):
             to_date -= timedelta(days=1)
         return [], []
 
-    def _fetch_statement_xml(
-        self, query_id: str, token: str, fd: str, td: str
-    ) -> str:
+    def _fetch_statement_xml(self, query_id: str, token: str, fd: str, td: str) -> str:
+        """Fetch one statement XML for given query and date range."""
         params = {"t": token, "q": query_id, "v": "3", "fd": fd, "td": td}
         send_url = f"{self.SEND_REQUEST_URL}?{urllib.parse.urlencode(params)}"
         ref, stmt_url, empty = self._send_request_with_retry(send_url)
@@ -143,8 +149,7 @@ class IBFlexQueryTaxReporter(TaxReporter):
 
         params = {"t": token, "q": ref, "v": "3"}
         get_url = (
-            f"{stmt_url or self.DEFAULT_GET_STATEMENT_URL}?"
-            f"{urllib.parse.urlencode(params)}"
+            f"{stmt_url or self.DEFAULT_GET_STATEMENT_URL}?" f"{urllib.parse.urlencode(params)}"
         )
         return self._fetch_statement_with_retry(get_url)
 
@@ -154,14 +159,13 @@ class IBFlexQueryTaxReporter(TaxReporter):
         retries: int = 5,
         wait_seconds: float = 5.0,
     ) -> tuple[str | None, str | None, bool]:
+        """Call SendRequest endpoint with retry on IB throttling."""
         for _ in range(retries):
             root = ET.fromstring(self._fetch_url(url))
             status = root.findtext("Status")
             error_code = root.findtext("ErrorCode")
             match (status, error_code):
-                case ("Success" | "Warn", _) if (
-                    ref := root.findtext("ReferenceCode")
-                ):
+                case ("Success" | "Warn", _) if (ref := root.findtext("ReferenceCode")):
                     return ref, root.findtext("Url"), False
                 case (_, "1003"):
                     return None, None, True
@@ -178,6 +182,7 @@ class IBFlexQueryTaxReporter(TaxReporter):
         retries: int = 20,
         wait_seconds: float = 3.0,
     ) -> str:
+        """Poll GetStatement endpoint until statement is ready."""
         for _ in range(retries):
             xml = self._fetch_url(url)
             root = ET.fromstring(xml)
@@ -196,6 +201,7 @@ class IBFlexQueryTaxReporter(TaxReporter):
         raise ValueError("IBKR GetStatement did not complete in time.")
 
     def _fetch_url(self, url: str) -> str:
+        """Fetch URL body as UTF-8 text."""
         req = urllib.request.Request(
             url,
             headers={"User-Agent": "polish-pit-calculator/1.0"},
@@ -207,6 +213,7 @@ class IBFlexQueryTaxReporter(TaxReporter):
         self,
         xml: str,
     ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        """Parse trades and cash transactions from statement XML."""
         root = ET.fromstring(xml)
         if (stmt := root.find(".//FlexStatement")) is None:
             return [], []
@@ -216,9 +223,8 @@ class IBFlexQueryTaxReporter(TaxReporter):
             [row.attrib for row in cash_rows],
         )
 
-    def _build_trades_dataframe(
-        self, trades: list[dict[str, str]]
-    ) -> pd.DataFrame | None:
+    def _build_trades_dataframe(self, trades: list[dict[str, str]]) -> pd.DataFrame | None:
+        """Convert raw trade entries into matched FIFO transaction rows."""
         if not trades:
             return None
 
@@ -234,9 +240,7 @@ class IBFlexQueryTaxReporter(TaxReporter):
         if not valid.any():
             return None
 
-        date_time = pd.to_datetime(
-            raw.loc[valid, "dateTime"], format="%Y%m%d;%H%M%S"
-        )
+        date_time = pd.to_datetime(raw.loc[valid, "dateTime"], format="%Y%m%d;%H%M%S")
         qty = quantity.loc[valid]
         df = pd.DataFrame(
             {
@@ -250,21 +254,17 @@ class IBFlexQueryTaxReporter(TaxReporter):
             }
         ).sort_values("DateTime", ignore_index=True)
 
-        exc_rates = fetch_exchange_rates(int(df["Year"].min()))
-        trades_df = self._fifo_match_trades(df, exc_rates)
+        trades_df = self._fifo_match_trades(df)
         return trades_df if not trades_df.empty else None
 
-    def _build_cash_dataframe(
-        self, cash: list[dict[str, str]]
-    ) -> pd.DataFrame | None:
+    def _build_cash_dataframe(self, cash: list[dict[str, str]]) -> pd.DataFrame | None:
+        """Convert raw cash entries into income and withholding rows."""
         if not cash:
             return None
 
         raw = pd.DataFrame(cash)
         raw_dt = raw["dateTime"].astype(str)
-        full_dt = raw_dt.where(
-            ~raw_dt.str.fullmatch(r"\d{8}"), raw_dt + ";000000"
-        )
+        full_dt = raw_dt.where(~raw_dt.str.fullmatch(r"\d{8}"), raw_dt + ";000000")
         date_time = pd.to_datetime(full_dt, format="%Y%m%d;%H%M%S")
         amount = pd.to_numeric(raw["amount"], errors="coerce").round(2)
         valid = amount.notna()
@@ -283,11 +283,8 @@ class IBFlexQueryTaxReporter(TaxReporter):
             }
         )
 
-        exc_rates = fetch_exchange_rates(int(df["Year"].min()))
         df["fx"] = df.apply(
-            lambda row: get_exchange_rate(
-                row["Currency"], row["Date"], exc_rates
-            ),
+            lambda row: get_exchange_rate(row["Currency"], row["Date"]),
             axis=1,
         )
 
@@ -296,15 +293,13 @@ class IBFlexQueryTaxReporter(TaxReporter):
             df[df["Type"].str.contains("dividend")],
             wtax,
             r"\s*\([^()]*\)\s*$",
-            r"\s-\s?.*$",
-            True,
+            (r"\s-\s?.*$", True),
         )
         interests = self._merge_income_with_withholding(
             df[df["Type"].str.contains("interest")],
             wtax,
             r"^[A-Z]{3}\s+",
-            r"^.*?\bon\b\s*",
-            False,
+            (r"^.*?\bon\b\s*", False),
         )
         cash_df = pd.concat([dividends, interests], ignore_index=True)
         if cash_df.empty:
@@ -316,8 +311,8 @@ class IBFlexQueryTaxReporter(TaxReporter):
     def _fifo_match_trades(
         self,
         df: pd.DataFrame,
-        exchange_rates: dict,
     ) -> pd.DataFrame:
+        """FIFO-match buys against sells and return realized trade rows."""
         trades_fifo: list[dict[str, float | int]] = []
         for _, symbol_df in df.groupby("Symbol"):
             buys = symbol_df[symbol_df["IsBuy"]].reset_index(drop=True).copy()
@@ -329,12 +324,10 @@ class IBFlexQueryTaxReporter(TaxReporter):
                 buy_fx = get_exchange_rate(
                     buy["Currency"],
                     buy["DateTime"].date(),
-                    exchange_rates,
                 )
                 sell_fx = get_exchange_rate(
                     sell["Currency"],
                     sell["DateTime"].date(),
-                    exchange_rates,
                 )
                 if buy["Quantity"] == sell["Quantity"]:
                     qty = buy["Quantity"]
@@ -366,9 +359,9 @@ class IBFlexQueryTaxReporter(TaxReporter):
         income_df: pd.DataFrame,
         wtax_df: pd.DataFrame,
         income_desc_regex: str,
-        wtax_desc_regex: str,
-        wtax_case: bool,
+        wtax_pattern_case: tuple[str, bool],
     ) -> pd.DataFrame:
+        """Normalize descriptions and attach matching withholding entries."""
         if income_df.empty:
             return income_df.iloc[0:0]
 
@@ -390,6 +383,7 @@ class IBFlexQueryTaxReporter(TaxReporter):
                 ascending=[True, False, True],
                 kind="mergesort",
             )
+            wtax_desc_regex, wtax_case = wtax_pattern_case
             wtax["Description"] = wtax["Description"].str.replace(
                 wtax_desc_regex,
                 "",

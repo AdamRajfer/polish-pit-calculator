@@ -1,0 +1,4 @@
+interface:
+  display_name: "PIT Tax Reporter"
+  short_description: "Build and verify Polish PIT tax reporter logic and parsers."
+  default_prompt: "Use this skill when adding or refactoring tax reporters, parsing broker exports, and validating tax summary outputs with strict tests."

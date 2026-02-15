@@ -1,56 +1,108 @@
+# PEP 517 build backend configuration.
 [build-system]
 requires = [
-    "setuptools>=68",
+    "setuptools",
+    "setuptools-scm",
     "wheel",
 ]
 build-backend = "setuptools.build_meta"
 
+# PEP 621 core project metadata and runtime requirements.
 [project]
 name = "polish-pit-calculator"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Tool for generating content for Polish PIT forms."
-authors = [
-    { name = "Adam Rajfer", email = "adam.rajfer@gmail.com" }
-]
-requires-python = ">=3.10"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Adam Rajfer", email = "adam.rajfer@gmail.com" }]
+requires-python = ">=3.12"
 dependencies = [
-    "pandas>=2.0,<3",
-    "questionary>=2,<3",
-    "scipy>=1.10,<2",
-    "streamlit>=1.28,<2",
-    "tabulate>=0.9,<1",
+    "pandas",
+    "prompt-toolkit",
+    "questionary",
+    "tabulate",
 ]
+keywords = [
+    "tax",
+    "pit",
+    "poland",
+    "finance",
+    "cli",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3 :: Only",
+    "License :: OSI Approved :: MIT License",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Topic :: Office/Business :: Financial",
+]
+scripts = { "pit-pl" = "src.app:main" }
+urls = { Repository = "https://github.com/AdamRajfer/polish-pit-calculator", Issues = "https://github.com/AdamRajfer/polish-pit-calculator/issues", Changelog = "https://github.com/AdamRajfer/polish-pit-calculator/blob/main/CHANGELOG.md" }
 
-[project.scripts]
-pit-pl = "src.app:run"
-
+# Optional dependency groups used during development only.
 [dependency-groups]
 dev = [
-    "pre-commit>=3.7,<4",
-    "pytest>=8,<9",
+    "pre-commit",
+    "pytest",
+    "pytest-cov",
+    "types-tabulate",
 ]
 
-[tool.black]
-line-length = 79
+# -----------------------------------------------------------------------------
+# Tooling configuration
+# -----------------------------------------------------------------------------
 
-[tool.isort]
-line_length = 79
-multi_line_output = 3
-include_trailing_comma = true
-force_grid_wrap = 0
-use_parentheses = true
+# Package discovery for setuptools build backend.
+[tool.setuptools.packages.find]
+include = ["src"]
 
-[tool.mypy]
-ignore_missing_imports = true
-explicit_package_bases = true
+# Derive package version from git tags.
+[tool.setuptools_scm]
+fallback_version = "0.0.0"
 
+# uv project behavior.
+[tool.uv]
+package = true
+
+# Code cleanup tooling (remove unused imports/variables).
 [tool.autoflake]
 remove_all_unused_imports = true
 in_place = true
 remove_unused_variables = true
 
-[tool.uv]
-package = true
+# Code formatter configuration.
+[tool.black]
+line-length = 100
 
-[tool.setuptools.packages.find]
-include = ["src"]
+# Import sorting configuration.
+[tool.isort]
+line_length = 100
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+
+# Pylint: keep strict checks, but allow data-heavy model classes.
+[tool.pylint.design]
+max-attributes = 16
+min-public-methods = 1
+
+# Pytest defaults, including coverage reporting.
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers --cov=src --cov-branch --cov-report=term-missing --cov-fail-under=100"
+
+# Coverage.py behavior used by pytest-cov.
+[tool.coverage.run]
+branch = true
+source = ["src"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 100
+precision = 2
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+]

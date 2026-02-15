@@ -1,1 +1,1 @@
-"""Polish PIT calculator package."""
+"""Application package for Polish PIT Calculator."""

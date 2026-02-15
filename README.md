@@ -1,16 +1,21 @@
 # Polish PIT Calculator
 
-Tool for generating content for Polish PIT forms.
+CLI package for aggregating broker/export data into a Polish PIT tax summary.
 
-## 1. Installation
+Current release: `0.1.0`
+
+## Requirements
+
+- Python `>=3.12`
+- `uv` for dependency and environment management
+
+## Installation
 
 ```bash
-uv sync
+uv sync --group dev
 ```
 
-## 2. Usage
-
-Run the console app:
+## Run The App
 
 ```bash
 uv run pit-pl
@@ -18,17 +23,49 @@ uv run pit-pl
 
 App flow:
 
-1. Select `Submit tax report`.
-2. Pick one report type and provide one source:
-   - file reporters: select a `.csv` file
-   - IB Flex Query: provide `Query ID` and API token
-3. Repeat `Submit tax report` until all sources are added.
-4. Select `Prepare tax summary`.
-5. Wait for loader (`Preparing tax summary...`).
-6. Review the final tax summary table.
-7. Select `Start over` or `Exit`.
+1. `Submit tax report`
+2. Select report type and provide one source
+3. Repeat until all sources are submitted
+4. `Prepare tax summary`
+5. Review the summary table
 
-Notes:
+Prompt controls:
 
-1. Press `Esc` in report/file/token prompts to go back.
-2. Press `Ctrl + C` at any time to exit immediately.
+- `Esc` goes back in selection/input prompts
+- `Ctrl+C` exits immediately
+
+## Development
+
+Run tests (coverage is enabled by default):
+
+```bash
+uv run pytest
+```
+
+Run all quality hooks:
+
+```bash
+pre-commit run --all-files
+```
+
+## Coverage
+
+Coverage report is printed at the end of `uv run pytest`.
+
+## Versioning
+
+Package version is derived from git tags via `setuptools-scm`.
+
+Release tags should follow semantic versioning, for example:
+
+- `v0.1.0`
+- `v0.2.0`
+- `v0.2.1`
+
+## Project Docs
+
+- `CONTRIBUTING.md`
+- `SECURITY.md`
+- `CHANGELOG.md`
+- `LICENSE`
+- `CODE_OF_CONDUCT.md`
