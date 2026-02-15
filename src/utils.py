@@ -1,9 +1,10 @@
 """Utilities for exchange-rate access and shared data-loading helpers."""
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from io import BytesIO
 from typing import Callable
+from urllib.error import HTTPError
 
 import pandas as pd
 
@@ -53,6 +54,75 @@ def _fetch_exchange_rates_for_year(year: int) -> pd.DataFrame:
     return df
 
 
+def _fetch_exchange_rates_for_date_range(start_date: date, end_date: date) -> pd.DataFrame:
+    """Fetch NBP table A rows for an inclusive date range."""
+    if start_date > end_date:
+        return pd.DataFrame(columns=["_1USD", "_1EUR"]).rename_axis(index="Date")
+
+    rows: list[dict[str, date | float]] = []
+    current_start = start_date
+    while current_start <= end_date:
+        current_end = min(current_start + timedelta(days=92), end_date)
+        try:
+            raw = pd.read_json(
+                (
+                    "https://api.nbp.pl/api/exchangerates/tables/A/"
+                    f"{current_start.isoformat()}/{current_end.isoformat()}/?format=json"
+                )
+            )
+        except HTTPError as error:
+            if error.code == 404:
+                current_start = current_end + timedelta(days=1)
+                continue
+            raise
+
+        for row in raw.itertuples(index=False):
+            rates = {
+                f"_1{rate['code']}": float(rate["mid"])
+                for rate in row.rates
+                if rate["code"] in {"USD", "EUR"}
+            }
+            if not rates:
+                continue
+            rows.append({"Date": pd.Timestamp(row.effectiveDate).date(), **rates})
+        current_start = current_end + timedelta(days=1)
+
+    if not rows:
+        return pd.DataFrame(columns=["_1USD", "_1EUR"]).rename_axis(index="Date")
+    df = pd.DataFrame(rows).set_index("Date").sort_index().rename_axis(index="Date")
+    for column in ("_1USD", "_1EUR"):
+        if column not in df.columns:
+            df[column] = float("nan")
+    return df[["_1USD", "_1EUR"]].astype(float)
+
+
+def _merge_exchange_rates_dataframes(cached: pd.DataFrame, fetched: pd.DataFrame) -> pd.DataFrame:
+    """Merge cached and fetched tables while preserving the latest row per date."""
+    merged = pd.concat([cached, fetched]).sort_index()
+    merged = merged[~merged.index.duplicated(keep="last")]
+    return merged.rename_axis(index="Date")
+
+
+def _refresh_current_year_dataframe(
+    year: int,
+    cached: pd.DataFrame,
+    current_date: date,
+) -> pd.DataFrame:
+    """Return refreshed current-year table, reusing cache when no update is needed."""
+    latest_cached_date = max(cached.index)
+    if latest_cached_date >= current_date:
+        return cached
+
+    missing_start = max(date(year, 1, 1), latest_cached_date + timedelta(days=1))
+    try:
+        missing_df = _fetch_exchange_rates_for_date_range(missing_start, current_date)
+    except (OSError, ValueError, pd.errors.ParserError):
+        return cached
+    if missing_df.empty:
+        return cached
+    return _merge_exchange_rates_dataframes(cached, missing_df)
+
+
 def _load_year_dataframe(
     year: int,
     current_year: int,
@@ -60,13 +130,24 @@ def _load_year_dataframe(
     read_cached: Callable[[int], pd.DataFrame | None],
     write_cached: Callable[[int, pd.DataFrame], None],
 ) -> pd.DataFrame:
-    """Load rates for a year, using cache only for past years."""
-    if year < current_year and (cached := read_cached(year)) is not None:
-        return cached
-    df = year_loader(year)
+    """Load rates for a year, using incremental cache refresh for current year."""
+    cached = read_cached(year)
     if year < current_year:
+        if cached is not None:
+            return cached
+        df = year_loader(year)
         write_cached(year, df)
-    return df
+        return df
+
+    if cached is None or cached.empty:
+        df = year_loader(year)
+        write_cached(year, df)
+        return df
+
+    refreshed_df = _refresh_current_year_dataframe(year, cached, datetime.now().date())
+    if refreshed_df is not cached:
+        write_cached(year, refreshed_df)
+    return refreshed_df
 
 
 def _fetch_exchange_rates(
