@@ -5,7 +5,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pandas as pd
 
-from polish_pit_calculator.ib_flex_query import IBFlexQueryTaxReporter
+from src.ib_flex_query import IBFlexQueryTaxReporter
 
 
 def _xml_attrs(attrs: dict[str, str]) -> str:
@@ -178,7 +178,7 @@ class TestIBFlexQueryTaxReporter(TestCase):
         ]
         with patch.object(reporter, "_fetch_url", side_effect=responses):
             with patch(
-                "polish_pit_calculator.ib_flex_query.time.sleep"
+                "src.ib_flex_query.time.sleep"
             ) as sleep:
                 result = reporter._send_request_with_retry("x")
 
@@ -192,7 +192,7 @@ class TestIBFlexQueryTaxReporter(TestCase):
             _send_response(status="Warn", error_code="1018"),
         ]
         with patch.object(reporter, "_fetch_url", side_effect=responses):
-            with patch("polish_pit_calculator.ib_flex_query.time.sleep"):
+            with patch("src.ib_flex_query.time.sleep"):
                 with self.assertRaisesRegex(ValueError, "rate-limited"):
                     reporter._send_request_with_retry("x", retries=2)
 
@@ -224,7 +224,7 @@ class TestIBFlexQueryTaxReporter(TestCase):
         ]
         with patch.object(reporter, "_fetch_url", side_effect=responses):
             with patch(
-                "polish_pit_calculator.ib_flex_query.time.sleep"
+                "src.ib_flex_query.time.sleep"
             ) as sleep:
                 result = reporter._fetch_statement_with_retry("x")
 
@@ -355,7 +355,7 @@ class TestIBFlexQueryTaxReporter(TestCase):
             list[dict[str, str]],
             list[dict[str, str]],
         ] = ([{"id": "current"}], [])
-        with patch("polish_pit_calculator.ib_flex_query.datetime") as dt_mock:
+        with patch("src.ib_flex_query.datetime") as dt_mock:
             dt_mock.now.return_value = datetime(2026, 2, 14, 12, 0, 0)
             with patch.object(
                 reporter,
@@ -389,8 +389,8 @@ class TestIBFlexQueryTaxReporter(TestCase):
             ],
         )
 
-    @patch("polish_pit_calculator.ib_flex_query.get_exchange_rate")
-    @patch("polish_pit_calculator.ib_flex_query.fetch_exchange_rates")
+    @patch("src.ib_flex_query.get_exchange_rate")
+    @patch("src.ib_flex_query.fetch_exchange_rates")
     def test_build_trades_dataframe_fifo(
         self,
         fetch_exchange_rates_mock,
@@ -425,8 +425,8 @@ class TestIBFlexQueryTaxReporter(TestCase):
 
         self.assertIsNone(df)
 
-    @patch("polish_pit_calculator.ib_flex_query.get_exchange_rate")
-    @patch("polish_pit_calculator.ib_flex_query.fetch_exchange_rates")
+    @patch("src.ib_flex_query.get_exchange_rate")
+    @patch("src.ib_flex_query.fetch_exchange_rates")
     def test_build_cash_dataframe_merges_and_calculates_pln(
         self,
         fetch_exchange_rates_mock,
@@ -473,8 +473,8 @@ class TestIBFlexQueryTaxReporter(TestCase):
         self.assertEqual(float(result.iloc[0]["Amount_wtax"]), 0.0)
         self.assertTrue(pd.isna(result.iloc[0]["Year"]))
 
-    @patch("polish_pit_calculator.ib_flex_query.get_exchange_rate")
-    @patch("polish_pit_calculator.ib_flex_query.fetch_exchange_rates")
+    @patch("src.ib_flex_query.get_exchange_rate")
+    @patch("src.ib_flex_query.fetch_exchange_rates")
     def test_generate_aggregates_trade_and_cash(
         self,
         fetch_exchange_rates_mock,

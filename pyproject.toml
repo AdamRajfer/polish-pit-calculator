@@ -1,3 +1,10 @@
+[build-system]
+requires = [
+    "setuptools>=68",
+    "wheel",
+]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "polish-pit-calculator"
 version = "1.0.0"
@@ -8,9 +15,14 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
     "pandas>=2.0,<3",
+    "questionary>=2,<3",
     "scipy>=1.10,<2",
     "streamlit>=1.28,<2",
+    "tabulate>=0.9,<1",
 ]
+
+[project.scripts]
+pit-pl = "src.app:run"
 
 [dependency-groups]
 dev = [
@@ -36,3 +48,9 @@ explicit_package_bases = true
 remove_all_unused_imports = true
 in_place = true
 remove_unused_variables = true
+
+[tool.uv]
+package = true
+
+[tool.setuptools.packages.find]
+include = ["src"]

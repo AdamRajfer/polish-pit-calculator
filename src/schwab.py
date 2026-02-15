@@ -2,8 +2,8 @@ from collections import defaultdict
 
 import pandas as pd
 
-from polish_pit_calculator.config import TaxRecord, TaxReport, TaxReporter
-from polish_pit_calculator.utils import fetch_exchange_rates, get_exchange_rate
+from src.config import TaxRecord, TaxReport, TaxReporter
+from src.utils import fetch_exchange_rates, get_exchange_rate
 
 
 class SchwabEmployeeSponsoredTaxReporter(TaxReporter):

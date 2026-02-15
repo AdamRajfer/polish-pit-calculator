@@ -1,6 +1,6 @@
 import pandas as pd
 
-from polish_pit_calculator.config import TaxRecord, TaxReport, TaxReporter
+from src.config import TaxRecord, TaxReport, TaxReporter
 
 
 class RevolutInterestTaxReporter(TaxReporter):
