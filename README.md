@@ -21,13 +21,14 @@ uv sync --group dev
 uv run pit-pl
 ```
 
-App flow:
+Main menu:
 
-1. `Submit tax report`
-2. Select report type and provide one source
-3. Repeat until all sources are submitted
-4. `Prepare tax summary`
-5. Review the summary table
+1. `Register tax reporter`
+2. `List tax reporters`
+3. `Remove tax reporters`
+4. `Prepare tax report`
+5. `Show tax report`
+6. `Exit`
 
 Prompt controls:
 

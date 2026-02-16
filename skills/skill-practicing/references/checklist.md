@@ -21,6 +21,7 @@ Use this checklist when updating agent instructions, skill metadata, and docs/co
 2. Verify release/version guidance matches project versioning strategy.
 3. Verify security/contact guidance is clear and current.
 4. Verify no stale references to removed modules, files, or entrypoints.
+5. For CLI/menu flow changes, verify README flow and `CHANGELOG.md` `Unreleased` notes are updated.
 
 ## Leak Audit
 

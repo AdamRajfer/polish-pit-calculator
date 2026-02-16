@@ -15,6 +15,7 @@ Apply this workflow whenever repository instructions or skills are touched.
 1. Confirm scope and affected files.
 2. Audit guidance files:
 - Check `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`, and `pyproject.toml` against current behavior and commands.
+- If CLI behavior changed, update README app flow and the `Unreleased` changelog section in the same pass.
 3. Audit for leaks:
 - Check for hardcoded tokens, keys, private URLs, and personal secrets in docs/config files.
 4. Update agent instructions:

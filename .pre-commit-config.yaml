@@ -31,13 +31,13 @@ repos:
     rev: v1.13.0
     hooks:
       - id: mypy
-        additional_dependencies: [toml, types-tabulate]
+        additional_dependencies: [toml, types-PyYAML, types-tabulate]
 
   - repo: https://github.com/PyCQA/pylint
     rev: v3.3.1
     hooks:
       - id: pylint
-        additional_dependencies: [toml, pandas, prompt-toolkit, questionary, tabulate, pytest]
+        additional_dependencies: [toml, pandas, prompt-toolkit, pyyaml, questionary, tabulate, pytest, jsonargparse]
 
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.24.2

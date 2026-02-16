@@ -17,8 +17,10 @@ license = { file = "LICENSE" }
 authors = [{ name = "Adam Rajfer", email = "adam.rajfer@gmail.com" }]
 requires-python = ">=3.12"
 dependencies = [
+    "jsonargparse",
     "pandas",
     "prompt-toolkit",
+    "pyyaml",
     "questionary",
     "tabulate",
 ]
@@ -47,6 +49,7 @@ dev = [
     "pre-commit",
     "pytest",
     "pytest-cov",
+    "types-PyYAML",
     "types-tabulate",
 ]
 
