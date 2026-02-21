@@ -1,19 +1,13 @@
 """Coinbase CSV tax reporter implementation."""
 
-from io import BytesIO
-
 import pandas as pd
 
-from src.config import TaxRecord, TaxReport, TaxReporter
+from src.config import CsvTaxReporter, TaxRecord, TaxReport
 from src.utils import get_exchange_rate
 
 
-class CoinbaseTaxReporter(TaxReporter):
+class CoinbaseTaxReporter(CsvTaxReporter):
     """Build a tax report from one or more Coinbase exports."""
-
-    def __init__(self, *csv_files: BytesIO) -> None:
-        """Store Coinbase CSV byte buffers."""
-        self.csv_files = csv_files
 
     def generate(self) -> TaxReport:
         """Generate yearly crypto revenue and cost summary."""
@@ -29,7 +23,7 @@ class CoinbaseTaxReporter(TaxReporter):
     def _load_report(self) -> pd.DataFrame:
         """Load, normalize and convert Coinbase CSV rows to PLN values."""
         reports = []
-        for csv_file in self.csv_files:
+        for csv_file in self.files:
             report = pd.read_csv(csv_file, skiprows=3, parse_dates=["Timestamp"])
             reports.append(report)
         df = pd.concat(reports, ignore_index=True)

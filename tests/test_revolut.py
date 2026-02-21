@@ -1,6 +1,7 @@
 """Tests for Revolut interest reporter behavior."""
 
-import io
+import tempfile
+from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -11,8 +12,10 @@ from src.config import TaxRecord
 from src.revolut import RevolutInterestTaxReporter
 
 
-def _buf(text: str) -> io.BytesIO:
-    return io.BytesIO(text.encode("utf-8"))
+def _buf(text: str) -> Path:
+    with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8") as file:
+        file.write(text)
+        return Path(file.name)
 
 
 class TestRevolutInterestTaxReporter(TestCase):
@@ -20,6 +23,7 @@ class TestRevolutInterestTaxReporter(TestCase):
 
     def test_load_report_filters_interest_and_parses_amounts(self) -> None:
         """Test filtering only interest rows and parsing numeric amounts."""
+        self.assertTrue(RevolutInterestTaxReporter.validate_file_path(Path("x.csv")))
         csv_text = (
             "Description,Completed Date,Money in\n"
             "Card payment,03-01-2025,10.00\n"

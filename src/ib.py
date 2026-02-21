@@ -27,6 +27,7 @@ class IBTradeCashTaxReporter(TaxReporter):
 
     def __init__(self, query_id: str, token: str) -> None:
         """Store Flex Query id and API token."""
+        super().__init__()
         self.query_id = str(query_id).strip()
         self.token = token.strip()
 

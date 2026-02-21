@@ -1,11 +1,12 @@
 """Comprehensive tests for core tax configuration models."""
 
+from pathlib import Path
 from unittest import TestCase
 
 import pandas as pd
 from pandas.testing import assert_frame_equal
 
-from src.config import TaxRecord, TaxReport, TaxReporter
+from src.config import JsonTaxReporter, TaxRecord, TaxReport, TaxReporter
 
 
 class TestTaxRecord(TestCase):
@@ -280,4 +281,9 @@ class TestTaxReporterAbstract(TestCase):
         self.assertEqual(
             TaxReporter.__abstractmethods__,
             frozenset({"generate"}),
+        )
+        self.assertTrue(TaxReporter.validate_file_path(Path("any.file")))
+        self.assertEqual(
+            JsonTaxReporter.validate_file_path(Path("x.csv")),
+            "Only .json files are supported.",
         )

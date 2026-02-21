@@ -90,7 +90,6 @@ use_parentheses = true
 # Pylint: keep strict checks, but allow data-heavy model classes.
 [tool.pylint.design]
 max-attributes = 16
-min-public-methods = 1
 
 # Pytest defaults, including coverage reporting.
 [tool.pytest.ini_options]

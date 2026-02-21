@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from io import BytesIO
+from pathlib import Path
 from typing import Callable
 from urllib.error import HTTPError
 
@@ -216,6 +216,6 @@ def get_exchange_rate(currency: str, date_: date) -> float:
     return exchange_rates_currency[max(previous_dates)]
 
 
-def load_and_concat_csv_files(csv_files: tuple[BytesIO, ...]) -> pd.DataFrame:
-    """Load and concatenate CSV byte buffers into one dataframe."""
+def load_and_concat_csv_files(csv_files: tuple[Path, ...]) -> pd.DataFrame:
+    """Load and concatenate CSV file paths into one dataframe."""
     return pd.concat([pd.read_csv(csv_file) for csv_file in csv_files], ignore_index=True)

@@ -50,9 +50,17 @@ class DummyQuestion:
 class DummyFileReporter(TaxReporter):
     """Minimal file-based reporter test double."""
 
+    @classmethod
+    def validate_file_path(cls, path: Path) -> bool | str:
+        """Expose validation rule for file-reporter tests."""
+        if path.suffix.lower() != ".csv":
+            return "Only .csv files are supported."
+        return True
+
     init_calls: list[tuple[object, ...]] = []
 
     def __init__(self, *args: object) -> None:
+        super().__init__()
         self.args = args
         DummyFileReporter.init_calls.append(args)
 
@@ -74,6 +82,7 @@ class DummyApiReporter(TaxReporter):
     init_calls: list[tuple[object, ...]] = []
 
     def __init__(self, *args: object) -> None:
+        super().__init__()
         self.args = args
         DummyApiReporter.init_calls.append(args)
 
@@ -198,18 +207,13 @@ def test_disable_tty_input_echo_tty_mode() -> None:
 
 def test_run_prepare_animation_renders_and_clears_line() -> None:
     """Test case."""
+    calls = {"count": 0}
 
-    class _StopAfterOne:
-        def __init__(self) -> None:
-            """Initialize loop-call counter."""
-            self.calls = 0
+    def _is_set() -> bool:
+        calls["count"] += 1
+        return calls["count"] > 1
 
-        def is_set(self) -> bool:
-            """Return True after first animation iteration."""
-            self.calls += 1
-            return self.calls > 1
-
-    stop = _StopAfterOne()
+    stop = SimpleNamespace(is_set=_is_set)
     with patch.object(app, "time") as time_mod:
         time_mod.sleep.return_value = None
         with patch.object(app.sys, "stdout") as stdout:
@@ -501,12 +505,8 @@ def _decode(content: str) -> str:
     return b64decode(content.encode("ascii"), validate=True).decode("utf-8")
 
 
-def _registry_home() -> Path:
-    return getattr(caches, "_registry_dir")()
-
-
 def _ensure_registry_directory() -> Path:
-    path = _registry_home()
+    path = getattr(caches, "_registry_dir")()
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     path.chmod(0o700)
     return path
@@ -643,7 +643,7 @@ def test_register_writes_file_and_api_entries() -> None:
                         ):
                             app.PolishPitConsoleApp().register()
 
-            first_file = _registry_home() / "256789012.yaml"
+            first_file = getattr(caches, "_registry_dir")() / "256789012.yaml"
             assert first_file.is_file()
             decoded = _decode(first_file.read_text(encoding="utf-8"))
             assert decoded is not None
@@ -670,7 +670,7 @@ def test_register_writes_file_and_api_entries() -> None:
                         ):
                             app.PolishPitConsoleApp().register()
 
-            second_file = _registry_home() / "454321098.yaml"
+            second_file = getattr(caches, "_registry_dir")() / "454321098.yaml"
             assert second_file.is_file()
             decoded = _decode(second_file.read_text(encoding="utf-8"))
             assert decoded is not None
@@ -833,20 +833,18 @@ def test_report_empty_and_populated_behavior() -> None:
             with patch.object(app.IBTradeCashTaxReporter, "generate", return_value=api_report):
                 with patch.object(app, "_run_prepare_animation", side_effect=lambda stop: None):
                     app_instance = app.PolishPitConsoleApp()
-                    with patch.object(app.sys.stdin, "fileno", return_value=0):
-                        with patch.object(app.os, "isatty", return_value=False):
-                            with patch("src.app.questionary.text", return_value=object()):
-                                with patch.object(
-                                    app, "_bind_escape_back", side_effect=lambda q: q
-                                ):
-                                    with patch.object(app, "_ask", return_value="__back__"):
-                                        with patch.object(
-                                            app.sys, "stdout", new=io.StringIO()
-                                        ) as out:
-                                            app_instance.report()
-            assert "2025" in out.getvalue()
-            assert app_instance.tax_report is not None
-            assert app_instance.pending_clear_lines > 0
+                with patch.object(app.sys.stdin, "fileno", return_value=0):
+                    with patch.object(app.os, "isatty", return_value=False):
+                        with patch("src.app.questionary.text", return_value=object()):
+                            with patch.object(app, "_bind_escape_back", side_effect=lambda q: q):
+                                with patch.object(app, "_ask", return_value="__back__"):
+                                    with patch.object(app.sys, "stdout", new=io.StringIO()) as out:
+                                        app_instance.report()
+            assert (
+                "2025" in out.getvalue()
+                and app_instance.tax_report is not None
+                and app_instance.pending_clear_lines == 0
+            )
             with patch.object(app_instance, "_build_tax_report", return_value=None):
                 with patch.object(app, "_run_prepare_animation", side_effect=lambda stop: None):
                     with patch.object(app.sys.stdin, "fileno", return_value=0):
@@ -875,13 +873,19 @@ def test_report_empty_and_populated_behavior() -> None:
 def test_run_clears_pending_lines_before_prompt() -> None:
     """Test case."""
     app_instance = app.PolishPitConsoleApp()
+    app_instance.pending_full_clear = True
     app_instance.pending_clear_lines = 3
     with patch.object(app_instance, "_prompt_main_action", return_value="exit"):
-        with patch.object(app, "_clear_last_lines") as clear_last_lines:
-            with pytest.raises(SystemExit):
-                app_instance.run()
+        with patch.object(app, "prompt_toolkit_clear") as prompt_toolkit_clear:
+            with patch.object(app.sys, "stdout") as stdout:
+                with patch.object(app, "_clear_last_lines") as clear_last_lines:
+                    with pytest.raises(SystemExit):
+                        app_instance.run()
+    prompt_toolkit_clear.assert_called_once_with()
+    assert stdout.write.call_args_list == [call("\x1b[3J\x1b[2J\x1b[H")]
+    stdout.flush.assert_called_once_with()
     clear_last_lines.assert_called_once_with(3)
-    assert app_instance.pending_clear_lines == 0
+    assert (app_instance.pending_full_clear, app_instance.pending_clear_lines) == (False, 0)
 
 
 def test_show_report_handles_missing_and_cached_report() -> None:
@@ -892,34 +896,47 @@ def test_show_report_handles_missing_and_cached_report() -> None:
     text.assert_not_called()
 
     app_instance.tax_report = TaxReport({2025: TaxRecord(trade_revenue=1.0)})
-    with patch.object(app_instance, "_print_tax_summary", return_value=2):
-        with patch("src.app.questionary.text", return_value=object()):
-            with patch.object(app, "_bind_escape_back", side_effect=lambda q: q) as bind:
-                with patch.object(app, "_ask", return_value="__back__") as ask:
-                    app_instance.show_report()
-    assert app_instance.pending_clear_lines == 2
-    bind.assert_called_once()
-    ask.assert_called_once()
+    question = SimpleNamespace()
+    with (
+        patch.object(app_instance, "_print_tax_summary", return_value=2),
+        patch("src.app.questionary.text", return_value=question),
+        patch.object(app, "_bind_escape_back", side_effect=lambda q: q) as bind,
+        patch.object(app, "_ask", return_value="__back__") as ask,
+    ):
+        app_instance.show_report()
+    assert getattr(question, "_block_typed_input") is True
+    assert (bind.call_count, ask.call_count) == (1, 1)
+    assert (app_instance.pending_full_clear, app_instance.pending_clear_lines) == (True, 0)
 
-    with patch.object(app_instance, "_print_tax_summary", return_value=3):
-        with patch("src.app.questionary.text", return_value=SimpleNamespace()):
-            with patch.object(app, "_bind_escape_back", side_effect=lambda q: q):
-                with patch.object(app, "_ask", return_value="__back__"):
-                    app_instance.show_report()
-    assert app_instance.pending_clear_lines == 3
+    sale_line = (
+        "12/31/2025 Sale RS; SalePrice: \x1b[31m$200\x1b[0m -> \x1b[32m$20\x1b[0m; "
+        "Quantity: \x1b[31m2\x1b[0m -> \x1b[32m20\x1b[0m"
+    )
+    deposit_line = (
+        "01/01/2025 Deposit ESPP; PurchasePrice: \x1b[31m$100\x1b[0m -> \x1b[32m$10\x1b[0m; "
+        "Quantity: \x1b[31m1\x1b[0m -> \x1b[32m10\x1b[0m"
+    )
+    source = "Charles Schwab Employee Sponsored"
+    app_instance.report_messages = [(source, sale_line), (source, deposit_line)]
+    with patch.object(app.sys, "stdout", new=io.StringIO()) as out:
+        printed_lines = _call_method(app_instance, "_print_tax_summary")
+    output = out.getvalue()
+    assert (
+        "Charles Schwab Employee Sponsored" in output
+        and "  - Deposit ESPP" in output
+        and "  - PurchasePrice:" in output
+    )
+    assert output.find("01/01/2025") < output.find("12/31/2025")
+    assert printed_lines == output.count("\n")
 
 
 def test_main_dispatches_selected_commands_and_exits() -> None:
     """Test case."""
     with patch.object(
-        app,
-        "_load_registered_entries",
-        return_value=[cast(app.RegisteredTaxReportEntry, {})],
+        app, "_load_registered_entries", return_value=[cast(app.RegisteredTaxReportEntry, {})]
     ):
         with patch.object(
-            app,
-            "_ask",
-            side_effect=["register", "ls", "rm", "report", "show", "exit"],
+            app, "_ask", side_effect=["register", "ls", "rm", "report", "show", "exit"]
         ):
             with patch.object(app.PolishPitConsoleApp, "register") as register:
                 with patch.object(app.PolishPitConsoleApp, "ls") as ls:

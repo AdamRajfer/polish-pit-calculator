@@ -491,9 +491,10 @@ class TestExchangeRateLookupAndCacheState(TestCase):
 
     def test_ensure_exchange_rates_raises_when_fetch_returns_none(self) -> None:
         """Test defensive error when cache remains empty after reload."""
-        rates._CACHE_STATE.exchange_rates = None  # pylint: disable=protected-access
-        rates._CACHE_STATE.min_year = None  # pylint: disable=protected-access
-        rates._CACHE_STATE.current_year = None  # pylint: disable=protected-access
+        cache_state = getattr(rates, "_CACHE_STATE")
+        setattr(cache_state, "exchange_rates", None)
+        setattr(cache_state, "min_year", None)
+        setattr(cache_state, "current_year", None)
 
         with patch.object(rates, "_fetch_exchange_rates", return_value=None):
             with self.assertRaisesRegex(ValueError, "unexpectedly empty"):
@@ -503,9 +504,10 @@ class TestExchangeRateLookupAndCacheState(TestCase):
         """Test cached rates are returned without reload when still valid."""
         current_year = datetime.now().year
         cached = {"USD": {date(2025, 1, 1): 4.0}, "EUR": {}}
-        rates._CACHE_STATE.exchange_rates = cached  # pylint: disable=protected-access
-        rates._CACHE_STATE.min_year = 2025  # pylint: disable=protected-access
-        rates._CACHE_STATE.current_year = current_year  # pylint: disable=protected-access
+        cache_state = getattr(rates, "_CACHE_STATE")
+        setattr(cache_state, "exchange_rates", cached)
+        setattr(cache_state, "min_year", 2025)
+        setattr(cache_state, "current_year", current_year)
 
         with patch.object(rates, "_fetch_exchange_rates") as fetch:
             value = _private("_ensure_exchange_rates")(2025)

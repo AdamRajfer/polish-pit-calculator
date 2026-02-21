@@ -1,6 +1,7 @@
 """Tests for Coinbase CSV reporter behavior."""
 
-import io
+import tempfile
+from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -11,11 +12,13 @@ from src.coinbase import CoinbaseTaxReporter
 from src.config import TaxRecord
 
 
-def _buf(text: str) -> io.BytesIO:
-    return io.BytesIO(text.encode("utf-8"))
+def _buf(text: str) -> Path:
+    with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8") as file:
+        file.write(text)
+        return Path(file.name)
 
 
-def _coinbase_csv(rows: list[str]) -> io.BytesIO:
+def _coinbase_csv(rows: list[str]) -> Path:
     prefix = "skip-1\nskip-2\nskip-3\n"
     header = "Timestamp,Transaction Type,Subtotal,Fees and/or Spread," + "Price Currency\n"
     body = "".join(rows)
@@ -28,6 +31,7 @@ class TestCoinbaseTaxReporter(TestCase):
     @patch("src.coinbase.get_exchange_rate", return_value=4.0)
     def test_load_report_buy_and_sell(self, _rate: object) -> None:
         """Test buy and sell rows are converted and scaled to PLN."""
+        self.assertTrue(CoinbaseTaxReporter.validate_file_path(Path("x.csv")))
         csv_file = _coinbase_csv(
             [
                 "2025-01-02T12:00:00Z,Advanced Trade Buy,$100.00,$1.50,USD\n",

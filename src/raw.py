@@ -1,19 +1,13 @@
 """Raw CSV tax reporter implementation."""
 
-from io import BytesIO
-
 import pandas as pd
 
-from src.config import TaxRecord, TaxReport, TaxReporter
+from src.config import CsvTaxReporter, TaxRecord, TaxReport
 from src.utils import load_and_concat_csv_files
 
 
-class RawTaxReporter(TaxReporter):
+class RawTaxReporter(CsvTaxReporter):
     """Build a tax report directly from user-provided normalized CSV files."""
-
-    def __init__(self, *csv_files: BytesIO) -> None:
-        """Store raw CSV byte buffers."""
-        self.csv_files = csv_files
 
     def generate(self) -> TaxReport:
         """Aggregate records by year and map rows to TaxRecord fields."""
@@ -27,4 +21,4 @@ class RawTaxReporter(TaxReporter):
 
     def _load_report(self) -> pd.DataFrame:
         """Load and concatenate all raw CSV inputs."""
-        return load_and_concat_csv_files(self.csv_files).fillna(0.0)
+        return load_and_concat_csv_files(self.files).fillna(0.0)

@@ -1,19 +1,13 @@
 """Revolut interest CSV tax reporter implementation."""
 
-from io import BytesIO
-
 import pandas as pd
 
-from src.config import TaxRecord, TaxReport, TaxReporter
+from src.config import CsvTaxReporter, TaxRecord, TaxReport
 from src.utils import load_and_concat_csv_files
 
 
-class RevolutInterestTaxReporter(TaxReporter):
+class RevolutInterestTaxReporter(CsvTaxReporter):
     """Build a tax report from Revolut interest statement exports."""
-
-    def __init__(self, *csv_files: BytesIO) -> None:
-        """Store Revolut CSV byte buffers."""
-        self.csv_files = csv_files
 
     def generate(self) -> TaxReport:
         """Generate yearly domestic-interest tax record values."""
@@ -25,7 +19,7 @@ class RevolutInterestTaxReporter(TaxReporter):
 
     def _load_report(self) -> pd.DataFrame:
         """Load and normalize Revolut interest rows."""
-        df = load_and_concat_csv_files(self.csv_files)
+        df = load_and_concat_csv_files(self.files)
         df = df[df["Description"].str.startswith("Gross interest")]
         df["Completed Date"] = pd.to_datetime(df["Completed Date"], dayfirst=True)
         df = df.sort_values(by="Completed Date", ignore_index=True)

@@ -1,6 +1,7 @@
 """Tests for raw CSV reporter behavior."""
 
-import io
+import tempfile
+from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
 
@@ -11,8 +12,10 @@ from src.config import TaxRecord, TaxReport
 from src.raw import RawTaxReporter
 
 
-def _buf(text: str) -> io.BytesIO:
-    return io.BytesIO(text.encode("utf-8"))
+def _buf(text: str) -> Path:
+    with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8") as file:
+        file.write(text)
+        return Path(file.name)
 
 
 class TestRawTaxReporter(TestCase):
@@ -20,6 +23,11 @@ class TestRawTaxReporter(TestCase):
 
     def test_load_report_concatenates_and_fills_missing_values(self) -> None:
         """Test concatenation and fill of missing numeric values."""
+        self.assertTrue(RawTaxReporter.validate_file_path(Path("x.csv")))
+        self.assertEqual(
+            RawTaxReporter.validate_file_path(Path("x.json")),
+            "Only .csv files are supported.",
+        )
         csv_1 = "year,description,trade_revenue,trade_cost\n2024,first,100.0,\n"
         csv_2 = "year,description,trade_revenue,trade_cost\n2025,second,50.0,30.0\n"
         reporter = RawTaxReporter(_buf(csv_1), _buf(csv_2))

@@ -2,6 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, fields
+from pathlib import Path
 
 import pandas as pd
 
@@ -229,6 +230,47 @@ class TaxReport:
 class TaxReporter(ABC):
     """Abstract base class for all tax reporters."""
 
+    def __init__(self) -> None:
+        """Initialize optional alignment log shared by reporters."""
+        self.alignment_change_log: list[str] = []
+
     @abstractmethod
     def generate(self) -> TaxReport:
         """Build and return yearly tax report data."""
+
+    @classmethod
+    def validate_file_path(cls, _path: Path) -> bool | str:
+        """Validate reporter-specific file input path."""
+        return True
+
+
+class CsvTaxReporter(TaxReporter, ABC):
+    """Base class for CSV-backed file reporters."""
+
+    def __init__(self, *files: Path) -> None:
+        """Store provided CSV file paths."""
+        super().__init__()
+        self.files = files
+
+    @classmethod
+    def validate_file_path(cls, path: Path) -> bool | str:
+        """Validate CSV reporter file extension."""
+        if path.suffix.lower() != ".csv":
+            return "Only .csv files are supported."
+        return True
+
+
+class JsonTaxReporter(TaxReporter, ABC):
+    """Base class for JSON-backed file reporters."""
+
+    def __init__(self, *files: Path) -> None:
+        """Store provided JSON file paths."""
+        super().__init__()
+        self.files = files
+
+    @classmethod
+    def validate_file_path(cls, path: Path) -> bool | str:
+        """Validate JSON reporter file extension."""
+        if path.suffix.lower() != ".json":
+            return "Only .json files are supported."
+        return True

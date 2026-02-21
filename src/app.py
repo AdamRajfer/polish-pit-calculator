@@ -7,7 +7,8 @@ import termios
 import threading
 import time
 import traceback
-from io import BytesIO, UnsupportedOperation
+from datetime import datetime
+from io import UnsupportedOperation
 from numbers import Real
 from pathlib import Path
 from typing import Callable, Generator, Literal, TypedDict, cast
@@ -17,6 +18,7 @@ import questionary
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.key_bindings import merge_key_bindings
 from prompt_toolkit.key_binding.key_processor import KeyPressEvent
+from prompt_toolkit.shortcuts import clear as prompt_toolkit_clear
 from questionary.prompts.path import GreatUXPathCompleter
 from questionary.question import Question
 from tabulate import tabulate
@@ -67,6 +69,7 @@ class GroupedFileEntry(TypedDict):
     """Grouped file reporter configuration used during summary build."""
 
     report_cls: ReporterFactory
+    report_title: str
     paths: list[Path]
 
 
@@ -202,7 +205,7 @@ def _bind_escape_back(question: Question) -> Question:
         _event.app.exit(result="__back__")
 
     question.application.key_bindings = merge_key_bindings(
-        [question.application.key_bindings, escape_bindings]
+        [escape_bindings, question.application.key_bindings]
     )
     if getattr(question, "_block_typed_input", False):
         readonly_bindings = KeyBindings()
@@ -215,7 +218,7 @@ def _bind_escape_back(question: Question) -> Question:
         for codepoint in range(32, 127):
             readonly_bindings.add(chr(codepoint), eager=True)(_ignore_keypress)
         question.application.key_bindings = merge_key_bindings(
-            [question.application.key_bindings, readonly_bindings]
+            [readonly_bindings, question.application.key_bindings]
         )
     return question
 
@@ -227,6 +230,13 @@ def _clear_last_lines(lines: int) -> None:
     for _ in range(lines):
         sys.stdout.write("\x1b[1A\x1b[2K")
     sys.stdout.write("\r")
+    sys.stdout.flush()
+
+
+def _clear_terminal_viewport() -> None:
+    """Clear terminal viewport and scrollback, then move cursor to top-left."""
+    prompt_toolkit_clear()
+    sys.stdout.write("\x1b[3J\x1b[2J\x1b[H")
     sys.stdout.flush()
 
 
@@ -285,11 +295,16 @@ class PolishPitConsoleApp:
     def __init__(self) -> None:
         """Initialize in-session prepared report cache."""
         self.tax_report: TaxReport | None = None
+        self.report_messages: list[tuple[str, str]] = []
+        self.pending_full_clear: bool = False
         self.pending_clear_lines: int = 0
 
     def run(self) -> None:
         """Run interactive registry command loop."""
         while True:
+            if self.pending_full_clear:
+                _clear_terminal_viewport()
+                self.pending_full_clear = False
             if self.pending_clear_lines:
                 _clear_last_lines(self.pending_clear_lines)
                 self.pending_clear_lines = 0
@@ -433,6 +448,7 @@ class PolishPitConsoleApp:
         )
         tax_report: TaxReport | None = None
         report_error: Exception | None = None
+        self.report_messages = []
         with _disable_tty_input_echo():
             loader_thread.start()
             try:
@@ -476,15 +492,17 @@ class PolishPitConsoleApp:
         """CLI command: display last prepared in-session report summary."""
         if self.tax_report is None:
             return
-        self.pending_clear_lines = self._print_tax_summary()
+        self._print_tax_summary()
         question = questionary.text("[esc to back]", erase_when_done=True)
         if hasattr(question, "__dict__"):
             setattr(question, "_block_typed_input", True)
         _ask(_bind_escape_back(question))
+        self.pending_full_clear = True
 
     def reset(self) -> None:
         """Reset in-session prepared report cache."""
         self.tax_report = None
+        self.report_messages = []
 
     def _prompt_main_action(self) -> MenuAction:
         """Prompt for command action with conditional disabled states."""
@@ -570,13 +588,13 @@ class PolishPitConsoleApp:
             return path.resolve() in existing_registered_paths
 
         def _validate_file_input(raw: str) -> bool | str:
-            """Validate non-empty, existing, CSV path."""
+            """Validate non-empty, existing and extension-matching file path."""
             if not (text := raw.strip()):
                 return "This field is required."
             if not (path := Path(text)).is_file():
                 return "Path must be a file."
-            if path.suffix.lower() != ".csv":
-                return "Only .csv files are supported."
+            if (report_validation := getattr(report_cls, "validate_file_path")(path)) is not True:
+                return report_validation
             if _is_already_registered(path):
                 return "File already registered for this report type."
             return True
@@ -588,8 +606,9 @@ class PolishPitConsoleApp:
                 file_filter=lambda raw: (
                     (path := Path(raw)).is_dir()
                     or (
-                        raw.lower().endswith(".csv")
-                        and (not path.is_file() or not _is_already_registered(path))
+                        path.is_file()
+                        and getattr(report_cls, "validate_file_path")(path) is True
+                        and not _is_already_registered(path)
                     )
                 ),
                 expanduser=True,
@@ -670,6 +689,7 @@ class PolishPitConsoleApp:
                     report_key,
                     {
                         "report_cls": tax_report_entry["report_cls"],
+                        "report_title": tax_report_entry["report_title"],
                         "paths": [],
                     },
                 )
@@ -679,17 +699,40 @@ class PolishPitConsoleApp:
             config = cast(ApiTaxReportData, tax_report_entry["tax_report_data"])
             tax_reporter = tax_report_entry["report_cls"](config["query_id"], config["token"])
             tax_report += tax_reporter.generate()
+            self.report_messages.extend(
+                (tax_report_entry["report_title"], message)
+                for message in tax_reporter.alignment_change_log
+            )
 
         for grouped in grouped_file_entries.values():
-            tax_reporter = grouped["report_cls"](
-                *[BytesIO(path.read_bytes()) for path in grouped["paths"]]
-            )
+            tax_reporter = grouped["report_cls"](*grouped["paths"])
             tax_report += tax_reporter.generate()
+            self.report_messages.extend(
+                (grouped["report_title"], message) for message in tax_reporter.alignment_change_log
+            )
 
         return tax_report
 
     def _print_tax_summary(self) -> int:
         """Render cached tax summary table and return printed line count."""
+        output_lines = 0
+        if self.report_messages:
+            for source, raw_line in sorted(
+                self.report_messages,
+                key=lambda entry: datetime.strptime(
+                    entry[1].split(" ", 1)[0],
+                    "%m/%d/%Y",
+                ),
+            ):
+                tx_date, details = raw_line.partition(" ")[::2]
+                print(
+                    f"[\x1b[36m{source}\x1b[0m] [\x1b[94m{tx_date}\x1b[0m]",
+                    flush=True,
+                )
+                output_lines += 1
+                for change in filter(None, details.split("; ")):
+                    print(f"  - {change}", flush=True)
+                    output_lines += 1
         df = cast(TaxReport, self.tax_report).to_dataframe().copy()
         year_columns = list(df.columns[1:])
         for column in year_columns:
@@ -706,7 +749,7 @@ class PolishPitConsoleApp:
             colalign=colalign,
         )
         print(text, flush=True)
-        return text.count("\n") + 1
+        return output_lines + text.count("\n") + 1
 
     def _print_error_frame(self, error: Exception) -> None:
         """Print red traceback inside a frame and track rendered line count."""
