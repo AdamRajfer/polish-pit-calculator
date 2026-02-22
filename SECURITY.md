@@ -15,3 +15,8 @@ Please include:
 - Reproduction steps
 - Affected version/tag
 - Suggested mitigation (if available)
+
+## Data Handling
+
+- Do not commit real account statements, API tokens, or personal tax identifiers.
+- Use redacted/synthetic fixtures in `tests/` and `data/`.

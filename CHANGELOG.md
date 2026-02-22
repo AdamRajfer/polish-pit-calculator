@@ -4,19 +4,27 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-02-15
+## [0.1.0] - 2026-02-23
 
 ### Added
 
-- Initial public release of Polish PIT Calculator.
-- Registry-first interactive console flow:
-  `Register tax reporter`, `List tax reporters`, `Remove tax reporters`, `Prepare tax report`,
-  `Show tax report`, `Exit`.
-- Reporter registration for file-based sources and Interactive Brokers Trade Cash API credentials.
-- Persistent reporter registry for cross-session workflows.
-- Report preparation loader with immediate summary display and dedicated re-show action.
-- Framed traceback output for report-preparation failures (`[esc to back]` flow).
-- Exchange-rate caching for previous years.
-- Expanded test suite across reporters, CLI/app flows, and cache utilities.
-- Coverage reporting in default `pytest` runs.
-- Repository docs: `LICENSE`, `CONTRIBUTING.md`, `SECURITY.md`.
+- New manual reporters for yearly PIT inputs: `Trade`, `Crypto`, and `Employment`.
+- Structured log model via `TaxReportLogs` and `LogChange`, with chronological ordering by
+  transaction date.
+- Reporter prompt validator reuse via shared validators in `polish_pit_calculator/validators.py`.
+- Main-menu action `Reset tax report`.
+- Package layout migrated from `src/*` modules to the package namespace
+  `polish_pit_calculator/*`.
+- Reporter implementations moved under `polish_pit_calculator/tax_reporters/`.
+- App responsibilities split into focused modules:
+  `app.py` (flow), `ui.py` (terminal/prompt), `registry.py` (persistence), `caches.py` (FX cache).
+- Reporter registry serialization now uses canonical class paths:
+  `polish_pit_calculator.tax_reporters.<ClassName>`.
+- Reporter naming updated to current class/display names:
+  `IBKRTaxReporter`, `CharlesSchwabEmployeeSponsoredTaxReporter`,
+  and display names shown in registry/menu.
+- Skill and repository guidance updated to reflect current paths, reporters, and workflows.
+- Reporter set is now focused on supported sources and manual reporters (no `Raw` reporter).
+- Maintained guidance files now consistently reference package paths instead of legacy `src/*`.
+- `TaxReport.__radd__` now handles subclass dispatch fallback without recursion.
+- Report/log presentation flow is consistent across prepare/show/back cycles.

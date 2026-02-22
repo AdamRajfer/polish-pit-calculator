@@ -1,6 +1,6 @@
 # Polish PIT Calculator
 
-CLI package for aggregating broker/export data into a Polish PIT tax summary.
+CLI package for aggregating broker/export/API data into a Polish PIT tax summary.
 
 Current release: `0.1.0`
 
@@ -28,7 +28,18 @@ Main menu:
 3. `Remove tax reporters`
 4. `Prepare tax report`
 5. `Show tax report`
-6. `Exit`
+6. `Reset tax report`
+7. `Exit`
+
+Supported tax reporters:
+
+- `Charles Schwab Employee Sponsored` (file, `.json`)
+- `Interactive Brokers` (API query ID + token)
+- `Coinbase` (file, `.csv`)
+- `Revolut Interest` (file, `.csv`)
+- `Trade` (manual yearly entry)
+- `Crypto` (manual yearly entry)
+- `Employment` (manual yearly entry)
 
 Prompt controls:
 

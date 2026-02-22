@@ -1,12 +1,14 @@
 """Comprehensive tests for core tax configuration models."""
 
 from pathlib import Path
+from typing import cast
 from unittest import TestCase
 
 import pandas as pd
 from pandas.testing import assert_frame_equal
 
-from src.config import JsonTaxReporter, TaxRecord, TaxReport, TaxReporter
+from polish_pit_calculator.config import TaxRecord, TaxReport
+from polish_pit_calculator.tax_reporters import ApiTaxReporter, FileTaxReporter, TaxReporter
 
 
 class TestTaxRecord(TestCase):
@@ -252,6 +254,40 @@ class TestTaxReport(TestCase):
         )
         self.assertEqual(merged, expected)
 
+    def test_radd_supports_builtin_sum_default_seed(self) -> None:
+        """Test sum([TaxReport, ...]) works by handling the implicit zero seed."""
+        reports = [
+            TaxReport({2024: TaxRecord(trade_revenue=1.0)}),
+            TaxReport({2024: TaxRecord(trade_revenue=2.0)}),
+            TaxReport({2025: TaxRecord(trade_revenue=3.0)}),
+        ]
+        actual = sum(reports)
+        expected = TaxReport(
+            {
+                2024: TaxRecord(trade_revenue=3.0),
+                2025: TaxRecord(trade_revenue=3.0),
+            }
+        )
+        self.assertEqual(actual, expected)
+
+    def test_radd_non_zero_seed_propagates_type_error_via_operator(self) -> None:
+        """Test unsupported additions still fail when non-zero seed is used."""
+        with self.assertRaises(TypeError):
+            _ = object() + TaxReport()
+
+    def test_radd_handles_tax_report_left_operand_via_operator_dispatch(self) -> None:
+        """Test __radd__ TaxReport branch through `+` without direct dunder call."""
+
+        class LeftOperand(TaxReport):
+            """Custom left operand that defers addition to right operand."""
+
+            def __add__(self, other: TaxReport) -> TaxReport:
+                return cast(TaxReport, NotImplemented)
+
+        left = LeftOperand({2024: TaxRecord(trade_revenue=1.0)})
+        right = TaxReport({2024: TaxRecord(trade_revenue=2.0)})
+        self.assertEqual(left + right, TaxReport({2024: TaxRecord(trade_revenue=3.0)}))
+
     def test_to_dataframe_formats_values_and_joins_pit_labels(self) -> None:
         """Test dataframe output includes PIT labels and 2-decimal formatted strings."""
         record = TaxRecord(
@@ -278,12 +314,39 @@ class TestTaxReporterAbstract(TestCase):
 
     def test_tax_reporter_is_abstract(self) -> None:
         """Test abstract base class cannot be instantiated directly."""
+
+        class DummyFileReporter(FileTaxReporter):
+            """Concrete file reporter for abstract-base behavior assertions."""
+
+            @classmethod
+            def extension(cls) -> str:
+                return ".csv"
+
+            @classmethod
+            def name(cls) -> str:
+                return "Dummy File"
+
+            def generate(self, logs: list[str] | None = None) -> TaxReport:
+                return TaxReport()
+
+        class DummyApiReporter(ApiTaxReporter):
+            """Concrete API reporter for abstract-base behavior assertions."""
+
+            @classmethod
+            def name(cls) -> str:
+                return "Dummy API"
+
+            def generate(self, logs: list[str] | None = None) -> TaxReport:
+                return TaxReport()
+
         self.assertEqual(
             TaxReporter.__abstractmethods__,
-            frozenset({"generate"}),
+            frozenset({"details", "generate", "name", "to_entry_data", "validators"}),
         )
-        self.assertTrue(TaxReporter.validate_file_path(Path("any.file")))
-        self.assertEqual(
-            JsonTaxReporter.validate_file_path(Path("x.csv")),
-            "Only .json files are supported.",
-        )
+        reporter = DummyFileReporter(Path("x.csv"))
+        self.assertEqual(reporter.path, Path("x.csv").resolve())
+        self.assertEqual(reporter.details, "File: x.csv")
+        self.assertEqual(DummyFileReporter.extension(), ".csv")
+        api_reporter = DummyApiReporter(123, " token ")
+        self.assertEqual(api_reporter.query_id, "123")
+        self.assertEqual(api_reporter.token, "token")

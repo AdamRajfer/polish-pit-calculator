@@ -8,11 +8,14 @@ from datetime import date, datetime, timedelta
 
 import pandas as pd
 
-from src.config import TaxRecord, TaxReport, TaxReporter
-from src.utils import get_exchange_rate
+from polish_pit_calculator.caches import ExchangeRatesCache
+from polish_pit_calculator.config import TaxRecord, TaxReport
+from polish_pit_calculator.registry import TaxReporterRegistry
+from polish_pit_calculator.tax_reporters.api import ApiTaxReporter
 
 
-class IBTradeCashTaxReporter(TaxReporter):
+@TaxReporterRegistry.register
+class IBKRTaxReporter(ApiTaxReporter):
     """Generate tax records using the IB Flex Query API under the legacy reporter name."""
 
     SEND_REQUEST_URL = (
@@ -25,13 +28,12 @@ class IBTradeCashTaxReporter(TaxReporter):
         "<FlexQueryResponse><FlexStatements count='0'></FlexStatements>" + "</FlexQueryResponse>"
     )
 
-    def __init__(self, query_id: str, token: str) -> None:
-        """Store Flex Query id and API token."""
-        super().__init__()
-        self.query_id = str(query_id).strip()
-        self.token = token.strip()
+    @classmethod
+    def name(cls) -> str:
+        """Return reporter name shown in app choices."""
+        return "Interactive Brokers"
 
-    def generate(self) -> TaxReport:
+    def generate(self, logs: list[str] | None = None) -> TaxReport:
         """Build yearly tax report from trades and cash transactions."""
         trades: list[dict[str, str]] = []
         cash: list[dict[str, str]] = []
@@ -285,7 +287,7 @@ class IBTradeCashTaxReporter(TaxReporter):
         )
 
         df["fx"] = df.apply(
-            lambda row: get_exchange_rate(row["Currency"], row["Date"]),
+            lambda row: ExchangeRatesCache.get_exchange_rate(row["Currency"], row["Date"]),
             axis=1,
         )
 
@@ -322,11 +324,11 @@ class IBTradeCashTaxReporter(TaxReporter):
             while buy_idx < len(buys) and sell_idx < len(sells):
                 buy = buys.iloc[buy_idx]
                 sell = sells.iloc[sell_idx]
-                buy_fx = get_exchange_rate(
+                buy_fx = ExchangeRatesCache.get_exchange_rate(
                     buy["Currency"],
                     buy["DateTime"].date(),
                 )
-                sell_fx = get_exchange_rate(
+                sell_fx = ExchangeRatesCache.get_exchange_rate(
                     sell["Currency"],
                     sell["DateTime"].date(),
                 )

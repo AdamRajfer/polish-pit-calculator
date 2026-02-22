@@ -11,13 +11,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "polish-pit-calculator"
 dynamic = ["version"]
-description = "Tool for generating content for Polish PIT forms."
+description = "CLI for aggregating brokerage, interest, and manual inputs into Polish PIT summaries."
 readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{ name = "Adam Rajfer", email = "adam.rajfer@gmail.com" }]
 requires-python = ">=3.12"
 dependencies = [
-    "jsonargparse",
     "pandas",
     "prompt-toolkit",
     "pyyaml",
@@ -40,7 +39,7 @@ classifiers = [
     "Intended Audience :: End Users/Desktop",
     "Topic :: Office/Business :: Financial",
 ]
-scripts = { "pit-pl" = "src.app:main" }
+scripts = { "pit-pl" = "polish_pit_calculator.app:main" }
 urls = { Repository = "https://github.com/AdamRajfer/polish-pit-calculator", Issues = "https://github.com/AdamRajfer/polish-pit-calculator/issues", Changelog = "https://github.com/AdamRajfer/polish-pit-calculator/blob/main/CHANGELOG.md" }
 
 # Optional dependency groups used during development only.
@@ -59,7 +58,7 @@ dev = [
 
 # Package discovery for setuptools build backend.
 [tool.setuptools.packages.find]
-include = ["src"]
+include = ["polish_pit_calculator", "polish_pit_calculator.*"]
 
 # Derive package version from git tags.
 [tool.setuptools_scm]
@@ -90,21 +89,28 @@ use_parentheses = true
 # Pylint: keep strict checks, but allow data-heavy model classes.
 [tool.pylint.design]
 max-attributes = 16
+max-args = 6
+max-positional-arguments = 6
+max-locals = 25
+min-public-methods = 1
+
+[tool.pylint.format]
+max-module-lines = 1400
 
 # Pytest defaults, including coverage reporting.
 [tool.pytest.ini_options]
-addopts = "--strict-config --strict-markers --cov=src --cov-branch --cov-report=term-missing --cov-fail-under=100"
+addopts = "--strict-config --strict-markers --cov=polish_pit_calculator --cov-branch --cov-report=term-missing --cov-fail-under=100"
 
 # Coverage.py behavior used by pytest-cov.
 [tool.coverage.run]
 branch = true
-source = ["src"]
+source = ["polish_pit_calculator"]
 
 [tool.coverage.report]
 show_missing = true
 fail_under = 100
 precision = 2
 exclude_lines = [
-    "pragma: no cover",
+    "if TYPE_CHECKING:",
     "if __name__ == .__main__.:",
 ]

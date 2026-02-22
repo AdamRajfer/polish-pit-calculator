@@ -9,11 +9,11 @@ from urllib.parse import parse_qs, urlparse
 import pandas as pd
 from pandas.testing import assert_frame_equal
 
-from src.config import TaxRecord, TaxReport
-from src.ib import IBTradeCashTaxReporter
+from polish_pit_calculator.config import TaxRecord, TaxReport
+from polish_pit_calculator.tax_reporters import IBKRTaxReporter
 
 
-def _private(reporter: IBTradeCashTaxReporter, name: str) -> Any:
+def _private(reporter: IBKRTaxReporter, name: str) -> Any:
     """Return a private reporter callable by name."""
     return getattr(reporter, name)
 
@@ -64,11 +64,25 @@ def _statement_response(status: str, error_code: str | None = None) -> str:
     return "".join(parts)
 
 
-class TestIBTradeCashTaxReporter(TestCase):
+class TestIBKRTaxReporter(TestCase):
     """Test parsing, request retries and dataframe building."""
 
-    def _reporter(self) -> IBTradeCashTaxReporter:
-        return IBTradeCashTaxReporter("query-id", "token")
+    def _reporter(self) -> IBKRTaxReporter:
+        return IBKRTaxReporter("query-id", "token")
+
+    def test_validate_query_id_requires_integer(self) -> None:
+        """Test prompt validator enforces non-empty query-id for IBKR reporter."""
+        validator = IBKRTaxReporter.validators()["query_id"]
+        self.assertEqual(validator(""), "Query ID is required.")
+        self.assertTrue(validator("abc"))
+        self.assertTrue(validator("123"))
+        self.assertTrue(validator("123"))
+
+    def test_validate_token_requires_non_empty(self) -> None:
+        """Test prompt validator enforces non-empty token for IBKR reporter."""
+        validator = IBKRTaxReporter.validators()["token"]
+        self.assertEqual(validator(""), "Token is required.")
+        self.assertTrue(validator(" token "))
 
     def test_parse_statement_entries(self) -> None:
         """Test parsing trades and cash rows from one statement."""
@@ -129,7 +143,7 @@ class TestIBTradeCashTaxReporter(TestCase):
             _send_response(status="Warn", reference="REF-2"),
         ]
         with patch.object(reporter, "_fetch_url", side_effect=responses):
-            with patch("src.ib.time.sleep") as sleep:
+            with patch("polish_pit_calculator.tax_reporters.ibkr.time.sleep") as sleep:
                 result = _private(reporter, "_send_request_with_retry")("x")
 
         self.assertEqual(result, ("REF-2", None, False))
@@ -143,7 +157,7 @@ class TestIBTradeCashTaxReporter(TestCase):
             _send_response(status="Warn", error_code="1018"),
         ]
         with patch.object(reporter, "_fetch_url", side_effect=responses):
-            with patch("src.ib.time.sleep"):
+            with patch("polish_pit_calculator.tax_reporters.ibkr.time.sleep"):
                 with self.assertRaisesRegex(ValueError, "rate-limited"):
                     _private(reporter, "_send_request_with_retry")("x", retries=2)
 
@@ -177,7 +191,7 @@ class TestIBTradeCashTaxReporter(TestCase):
             _statement_xml(),
         ]
         with patch.object(reporter, "_fetch_url", side_effect=responses):
-            with patch("src.ib.time.sleep") as sleep:
+            with patch("polish_pit_calculator.tax_reporters.ibkr.time.sleep") as sleep:
                 result = _private(reporter, "_fetch_statement_with_retry")("x")
 
         self.assertEqual(result, responses[1])
@@ -204,7 +218,7 @@ class TestIBTradeCashTaxReporter(TestCase):
         reporter = self._reporter()
         response = _statement_response(status="Warn", error_code="1018")
         with patch.object(reporter, "_fetch_url", return_value=response):
-            with patch("src.ib.time.sleep"):
+            with patch("polish_pit_calculator.tax_reporters.ibkr.time.sleep"):
                 with self.assertRaisesRegex(ValueError, "did not complete in time"):
                     _private(reporter, "_fetch_statement_with_retry")("x", retries=2)
 
@@ -316,11 +330,11 @@ class TestIBTradeCashTaxReporter(TestCase):
         get_stmt.assert_not_called()
 
 
-class TestIBTradeCashTaxReporterDataAndIteration(TestCase):
+class TestIBKRTaxReporterDataAndIteration(TestCase):
     """Test statement iteration and dataframe/cash processing paths."""
 
-    def _reporter(self) -> IBTradeCashTaxReporter:
-        return IBTradeCashTaxReporter("query-id", "token")
+    def _reporter(self) -> IBKRTaxReporter:
+        return IBKRTaxReporter("query-id", "token")
 
     def _sample_trades(self) -> list[dict[str, str]]:
         return [
@@ -399,7 +413,10 @@ class TestIBTradeCashTaxReporterDataAndIteration(TestCase):
                 """Return encoded XML payload body."""
                 return b"<xml/>"
 
-        with patch("src.ib.urllib.request.urlopen", return_value=_Response()) as open_:
+        with patch(
+            "polish_pit_calculator.tax_reporters.ibkr.urllib.request.urlopen",
+            return_value=_Response(),
+        ) as open_:
             xml = _private(reporter, "_fetch_url")("https://example.test")
 
         self.assertEqual(xml, "<xml/>")
@@ -468,7 +485,7 @@ class TestIBTradeCashTaxReporterDataAndIteration(TestCase):
     def test_iter_statement_entries_skips_initial_empty_current_year(self) -> None:
         """Test yearly iterator continues after empty current year before first data year."""
         reporter = self._reporter()
-        with patch("src.ib.datetime") as dt_mock:
+        with patch("polish_pit_calculator.tax_reporters.ibkr.datetime") as dt_mock:
             dt_mock.now.return_value = datetime(2026, 2, 14, 12, 0, 0)
             with patch.object(
                 reporter,
@@ -505,7 +522,7 @@ class TestIBTradeCashTaxReporterDataAndIteration(TestCase):
             list[dict[str, str]],
             list[dict[str, str]],
         ] = ([{"id": "current"}], [])
-        with patch("src.ib.datetime") as dt_mock:
+        with patch("polish_pit_calculator.tax_reporters.ibkr.datetime") as dt_mock:
             dt_mock.now.return_value = datetime(2026, 2, 14, 12, 0, 0)
             with patch.object(
                 reporter,
@@ -539,7 +556,7 @@ class TestIBTradeCashTaxReporterDataAndIteration(TestCase):
             ],
         )
 
-    @patch("src.ib.get_exchange_rate")
+    @patch("polish_pit_calculator.tax_reporters.ibkr.ExchangeRatesCache.get_exchange_rate")
     def test_build_trades_dataframe_fifo(
         self,
         get_exchange_rate_mock,
@@ -589,7 +606,7 @@ class TestIBTradeCashTaxReporterDataAndIteration(TestCase):
 
         self.assertIsNone(df)
 
-    @patch("src.ib.get_exchange_rate")
+    @patch("polish_pit_calculator.tax_reporters.ibkr.ExchangeRatesCache.get_exchange_rate")
     def test_build_cash_dataframe_merges_and_calculates_pln(
         self,
         get_exchange_rate_mock,
@@ -647,7 +664,10 @@ class TestIBTradeCashTaxReporterDataAndIteration(TestCase):
         df = _private(reporter, "_build_cash_dataframe")(rows)
         self.assertIsNone(df)
 
-    @patch("src.ib.get_exchange_rate", return_value=4.0)
+    @patch(
+        "polish_pit_calculator.tax_reporters.ibkr.ExchangeRatesCache.get_exchange_rate",
+        return_value=4.0,
+    )
     def test_build_cash_dataframe_returns_none_for_non_income_types(
         self,
         _rate: object,
@@ -718,7 +738,10 @@ class TestIBTradeCashTaxReporterDataAndIteration(TestCase):
 
         assert_frame_equal(result, empty_income.iloc[0:0], check_dtype=False)
 
-    @patch("src.ib.get_exchange_rate", return_value=1.0)
+    @patch(
+        "polish_pit_calculator.tax_reporters.ibkr.ExchangeRatesCache.get_exchange_rate",
+        return_value=1.0,
+    )
     def test_fifo_match_trades_buy_less_than_sell_branch(self, _rate: object) -> None:
         """Test FIFO branch where buy quantity is lower than sell quantity."""
         reporter = self._reporter()
@@ -758,7 +781,7 @@ class TestIBTradeCashTaxReporterDataAndIteration(TestCase):
         )
         assert_frame_equal(actual.reset_index(drop=True), expected)
 
-    @patch("src.ib.get_exchange_rate")
+    @patch("polish_pit_calculator.tax_reporters.ibkr.ExchangeRatesCache.get_exchange_rate")
     def test_generate_aggregates_trade_and_cash(
         self,
         get_exchange_rate_mock,
@@ -797,7 +820,7 @@ class TestIBTradeCashTaxReporterDataAndIteration(TestCase):
 
 def test_generate_returns_empty_report_without_entries() -> None:
     """Test generate returns empty report when no statement entries."""
-    reporter = IBTradeCashTaxReporter("query-id", "token")
+    reporter = IBKRTaxReporter("query-id", "token")
     with patch.object(
         reporter,
         "_iter_statement_entries",

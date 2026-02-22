@@ -1,36 +1,40 @@
-"""Tests for console app helper functions and control flow."""
+"""Comprehensive unit tests for app module helpers and command flow."""
 
+# pylint: disable=protected-access
+
+import contextlib
 import io
-import tempfile
-from base64 import b64decode, b64encode
+from datetime import datetime
 from io import UnsupportedOperation
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 from unittest.mock import Mock, call, patch
 
 import pytest
-import yaml
 from prompt_toolkit.key_binding import KeyBindings
 
-from src import app, caches
-from src.config import TaxRecord, TaxReport, TaxReporter
-
-
-def _call_module(name: str, *args: Any, **kwargs: Any) -> Any:
-    """Call private module-level helpers by name."""
-    return getattr(app, name)(*args, **kwargs)
-
-
-def _call_method(instance: object, name: str, *args: Any, **kwargs: Any) -> Any:
-    """Call private instance methods by name."""
-    return getattr(instance, name)(*args, **kwargs)
+import polish_pit_calculator.ui as ui_module
+from polish_pit_calculator import app, tax_reporters
+from polish_pit_calculator.config import TaxRecord, TaxReport, TaxReportLogs
+from polish_pit_calculator.registry import TaxReporterRegistry
+from polish_pit_calculator.tax_reporters import (
+    ApiTaxReporter,
+    CharlesSchwabEmployeeSponsoredTaxReporter,
+    CoinbaseTaxReporter,
+    EmploymentTaxReporter,
+    FileTaxReporter,
+    IBKRTaxReporter,
+    RevolutInterestTaxReporter,
+    TaxReporter,
+)
+from polish_pit_calculator.tax_reporters import file as file_module
 
 
 class DummyQuestion:
-    """Question-like object used to test prompt wrappers."""
+    """Question-like object compatible with app.ask."""
 
-    def __init__(self, result: object) -> None:
+    def __init__(self, result: object = "ok") -> None:
         self.application = SimpleNamespace(
             ttimeoutlen=1,
             timeoutlen=1,
@@ -39,962 +43,1306 @@ class DummyQuestion:
         self._result = result
 
     def unsafe_ask(self) -> object:
-        """Return configured answer payload."""
-        return self._result
-
-    def peek_result(self) -> object:
-        """Expose payload for assertions."""
+        """Return configured answer."""
         return self._result
 
 
-class DummyFileReporter(TaxReporter):
-    """Minimal file-based reporter test double."""
+class DummyFileReporter(FileTaxReporter):
+    """Simple file-backed reporter for entry-collector tests."""
 
     @classmethod
-    def validate_file_path(cls, path: Path) -> bool | str:
-        """Expose validation rule for file-reporter tests."""
-        if path.suffix.lower() != ".csv":
-            return "Only .csv files are supported."
-        return True
-
-    init_calls: list[tuple[object, ...]] = []
-
-    def __init__(self, *args: object) -> None:
-        super().__init__()
-        self.args = args
-        DummyFileReporter.init_calls.append(args)
+    def extension(cls) -> str:
+        """Return accepted extension for this test reporter."""
+        return ".csv"
 
     @classmethod
-    def clear_calls(cls) -> None:
-        """Reset recorded constructor calls."""
-        cls.init_calls = []
+    def name(cls) -> str:
+        """Return display name."""
+        return "Dummy File"
 
-    def generate(self) -> TaxReport:
-        """Return fixed single-year report payload."""
+    def generate(self, logs: list[str] | None = None) -> TaxReport:
+        """Return deterministic data."""
         report = TaxReport()
-        report[2025] = TaxRecord(trade_revenue=10.0)
+        report[2025] = TaxRecord(trade_revenue=1.0)
         return report
 
 
-class DummyApiReporter(TaxReporter):
-    """Minimal API-based reporter test double."""
-
-    init_calls: list[tuple[object, ...]] = []
-
-    def __init__(self, *args: object) -> None:
-        super().__init__()
-        self.args = args
-        DummyApiReporter.init_calls.append(args)
+class DummyApiReporter(ApiTaxReporter):
+    """Simple API-backed reporter for entry-collector tests."""
 
     @classmethod
-    def clear_calls(cls) -> None:
-        """Reset recorded constructor calls."""
-        cls.init_calls = []
+    def name(cls) -> str:
+        """Return display name."""
+        return "Dummy API"
 
-    def generate(self) -> TaxReport:
-        """Return fixed single-year report payload."""
+    def generate(self, logs: list[str] | None = None) -> TaxReport:
+        """Return deterministic data."""
         report = TaxReport()
-        report[2025] = TaxRecord(trade_revenue=5.0)
+        report[2025] = TaxRecord(trade_revenue=2.0)
         return report
 
 
-def _reset_dummy_calls() -> None:
-    """Clear constructor-call history of dummy reporters."""
-    DummyFileReporter.clear_calls()
-    DummyApiReporter.clear_calls()
+class UnsupportedReporter(TaxReporter):
+    """Reporter class unsupported by register() branch selection."""
+
+    @classmethod
+    def name(cls) -> str:
+        """Return display name."""
+        return "Unsupported"
+
+    @classmethod
+    def validators(cls):
+        """Return deterministic validator map for unsupported reporter tests."""
+        return {"value": lambda raw: True}
+
+    @property
+    def details(self) -> str:
+        """Return reporter details."""
+        return ""
+
+    def to_entry_data(self) -> dict[str, Any]:
+        """Return deterministic reporter payload for unsupported reporter tests."""
+        return {}
+
+    def generate(self, logs: list[str] | None = None) -> TaxReport:
+        """Return empty report."""
+        return TaxReport()
 
 
-def test_ask_sets_timeouts_and_returns_result() -> None:
-    """Test case."""
+def _key(binding: object) -> str:
+    keys = getattr(binding, "keys")
+    return str(getattr(keys[0], "value", keys[0]))
+
+
+def _entry(
+    *,
+    entry_id: str,
+    key: str,
+    title: str,
+    details: str,
+    data: dict[str, Any],
+    registry_path: Path | None = None,
+) -> tuple[str, TaxReporter]:
+    """Build one `(entry_id, reporter)` tuple for app unit tests."""
+    _ = title
+    _ = details
+    _ = registry_path
+    reporter_cls_by_name: dict[str, type[TaxReporter]] = {
+        DummyFileReporter.__name__: DummyFileReporter,
+        DummyApiReporter.__name__: DummyApiReporter,
+        CharlesSchwabEmployeeSponsoredTaxReporter.__name__: (
+            CharlesSchwabEmployeeSponsoredTaxReporter
+        ),
+        IBKRTaxReporter.__name__: IBKRTaxReporter,
+        CoinbaseTaxReporter.__name__: CoinbaseTaxReporter,
+        RevolutInterestTaxReporter.__name__: RevolutInterestTaxReporter,
+        EmploymentTaxReporter.__name__: EmploymentTaxReporter,
+    }
+    reporter_cls = reporter_cls_by_name[key]
+    reporter: TaxReporter
+    if issubclass(reporter_cls, FileTaxReporter):
+        reporter = reporter_cls(data["path"])
+    elif issubclass(reporter_cls, ApiTaxReporter):
+        reporter = reporter_cls(data["query_id"], data["token"])
+    elif reporter_cls is EmploymentTaxReporter:
+        reporter = EmploymentTaxReporter(
+            data["year"],
+            data["employment_revenue"],
+            data["employment_cost"],
+            data["social_security_contributions"],
+            data["donations"],
+        )
+    else:
+        raise TypeError(f"Unsupported reporter class: {reporter_cls}")
+    return entry_id, reporter
+
+
+def _report(**record_kwargs: float) -> TaxReport:
+    """Build one-year report helper."""
+    report = TaxReport()
+    report[2025] = TaxRecord(**record_kwargs)
+    return report
+
+
+def _fake_context() -> contextlib.AbstractContextManager[None]:
+    """Return no-op context manager helper."""
+    return contextlib.nullcontext()
+
+
+def _fake_thread_noop(*_args: Any, **_kwargs: Any) -> Any:
+    """Return thread-like object whose lifecycle methods are no-ops."""
+
+    class _Thread:
+        """No-op thread replacement for unit tests."""
+
+        def start(self) -> None:
+            """Start no-op thread."""
+            return
+
+        def join(self) -> None:
+            """Join no-op thread."""
+            return
+
+    return _Thread()
+
+
+def test_ask_sets_timeouts_and_returns_answer() -> None:
+    """_ask should set prompt timeouts to 0 and return prompt value."""
     question = DummyQuestion("ok")
-    assert question.peek_result() == "ok"
-    result = _call_module("_ask", question)
+    result = ui_module._ask(question)
     assert result == "ok"
     assert question.application.ttimeoutlen == 0
     assert question.application.timeoutlen == 0
 
 
-def test_bind_escape_back_rebinds_key_bindings() -> None:
-    """Test case."""
+def test_ask_injects_escape_binding_that_returns_back() -> None:
+    """Escape key handler should exit prompt with explicit back sentinel."""
     question = DummyQuestion("ok")
-    original = question.application.key_bindings
-    bound = _call_module("_bind_escape_back", question)
-    assert bound is question
-    assert bound.application.key_bindings is not original
-    event = SimpleNamespace(app=SimpleNamespace(exit=Mock()))
+    ui_module._ask(question)
+
     escape_binding = next(
         binding
-        for binding in bound.application.key_bindings.bindings
-        if binding.keys == ("escape",)
+        for binding in question.application.key_bindings.bindings
+        if _key(binding) == "escape"
     )
+    event = SimpleNamespace(app=SimpleNamespace(exit=Mock()))
     escape_binding.handler(event)
     event.app.exit.assert_called_once_with(result="__back__")
 
 
-def test_bind_escape_back_blocks_typed_keys_when_flag_set() -> None:
-    """Test case."""
+def test_ask_readonly_mode_binds_enter_and_printable_keys() -> None:
+    """Readonly prompts should ignore Enter and ASCII key presses."""
     question = DummyQuestion("ok")
-    setattr(question, "_block_typed_input", True)
-    bound = _call_module("_bind_escape_back", question)
-    assert any(
-        getattr(binding.keys[0], "value", binding.keys[0]) == "c-m"
-        for binding in bound.application.key_bindings.bindings
+    ui_module._ask(question, block_typed_input=True)
+
+    assert any(_key(binding) == "c-m" for binding in question.application.key_bindings.bindings)
+    assert any(_key(binding) == "0" for binding in question.application.key_bindings.bindings)
+    assert any(_key(binding) == "9" for binding in question.application.key_bindings.bindings)
+    assert any(_key(binding) == "A" for binding in question.application.key_bindings.bindings)
+    assert any(_key(binding) == "z" for binding in question.application.key_bindings.bindings)
+
+    enter_binding = next(
+        binding for binding in question.application.key_bindings.bindings if _key(binding) == "c-m"
     )
-    zero_binding = next(
-        binding for binding in bound.application.key_bindings.bindings if binding.keys == ("0",)
+    digit_binding = next(
+        binding for binding in question.application.key_bindings.bindings if _key(binding) == "7"
     )
-    alpha_binding = next(
-        binding for binding in bound.application.key_bindings.bindings if binding.keys == ("k",)
-    )
-    assert any(binding.keys == ("9",) for binding in bound.application.key_bindings.bindings)
-    zero_binding.handler(SimpleNamespace())
-    alpha_binding.handler(SimpleNamespace())
+    enter_binding.handler(SimpleNamespace())
+    digit_binding.handler(SimpleNamespace())
 
 
-def test_clear_last_lines_writes_escape_sequences() -> None:
-    """Test case."""
-    with patch.object(app.sys, "stdout") as stdout:
-        _call_module("_clear_last_lines", 2)
-    assert stdout.write.call_args_list == [
-        call("\x1b[1A\x1b[2K"),
-        call("\x1b[1A\x1b[2K"),
-        call("\r"),
-    ]
-    stdout.flush.assert_called_once()
-
-
-def test_clear_last_lines_noop_for_zero() -> None:
-    """Test case."""
-    with patch.object(app.sys, "stdout") as stdout:
-        _call_module("_clear_last_lines", 0)
-    stdout.write.assert_not_called()
-    stdout.flush.assert_not_called()
-
-
-def test_disable_tty_input_echo_non_tty() -> None:
-    """Test case."""
-    with patch.object(app.sys.stdin, "fileno", return_value=0):
-        with patch.object(app.os, "isatty", return_value=False):
-            with patch.object(app.termios, "tcgetattr") as tcgetattr:
-                with _call_module("_disable_tty_input_echo"):
-                    pass
-    tcgetattr.assert_not_called()
-
-
-def test_disable_tty_input_echo_unsupported_fileno() -> None:
-    """Test case."""
-    with patch.object(app.sys.stdin, "fileno", side_effect=UnsupportedOperation):
-        with patch.object(app.termios, "tcgetattr") as tcgetattr:
-            with _call_module("_disable_tty_input_echo"):
+def testdisable_tty_input_echo_skips_on_unsupported_fileno() -> None:
+    """Context manager should no-op for unsupported stdin.fileno."""
+    with patch.object(ui_module.sys.stdin, "fileno", side_effect=UnsupportedOperation):
+        with patch.object(ui_module.termios, "tcgetattr") as tcgetattr:
+            with app.ui._disable_tty_input_echo():
                 pass
     tcgetattr.assert_not_called()
 
 
-def test_disable_tty_input_echo_tty_mode() -> None:
-    """Test case."""
-    old = [0, 0, 0, app.termios.ECHO | app.termios.ICANON, 0, 0, 0]
+def testdisable_tty_input_echo_skips_on_oserror_fileno() -> None:
+    """Context manager should no-op for OSError from stdin.fileno."""
+    with patch.object(ui_module.sys.stdin, "fileno", side_effect=OSError):
+        with patch.object(ui_module.termios, "tcgetattr") as tcgetattr:
+            with app.ui._disable_tty_input_echo():
+                pass
+    tcgetattr.assert_not_called()
+
+
+def testdisable_tty_input_echo_skips_for_non_tty() -> None:
+    """Context manager should no-op when stdin is not a TTY."""
+    with patch.object(ui_module.sys.stdin, "fileno", return_value=0):
+        with patch.object(ui_module.os, "isatty", return_value=False):
+            with patch.object(ui_module.termios, "tcgetattr") as tcgetattr:
+                with app.ui._disable_tty_input_echo():
+                    pass
+    tcgetattr.assert_not_called()
+
+
+def testdisable_tty_input_echo_toggles_and_restores_terminal_flags() -> None:
+    """TTY mode should disable echo/canonical input and restore old state."""
+    old = [0, 0, 0, ui_module.termios.ECHO | ui_module.termios.ICANON, 0, 0, 0]
     new = old.copy()
-    with patch.object(app.os, "isatty", return_value=True):
-        with patch.object(app.sys.stdin, "fileno", return_value=0):
-            with patch.object(app.termios, "tcgetattr", side_effect=[old.copy(), new.copy()]):
-                with patch.object(app.termios, "tcsetattr") as tcsetattr:
-                    with patch.object(app.termios, "tcflush") as tcflush:
-                        with _call_module("_disable_tty_input_echo"):
+
+    with patch.object(ui_module.sys.stdin, "fileno", return_value=0):
+        with patch.object(ui_module.os, "isatty", return_value=True):
+            with patch.object(ui_module.termios, "tcgetattr", side_effect=[old.copy(), new.copy()]):
+                with patch.object(ui_module.termios, "tcsetattr") as tcsetattr:
+                    with patch.object(ui_module.termios, "tcflush") as tcflush:
+                        with app.ui._disable_tty_input_echo():
                             pass
+
     assert tcsetattr.call_count == 2
     assert tcflush.call_count == 2
+    modified = tcsetattr.call_args_list[0].args[2]
+    assert modified[3] & ui_module.termios.ECHO == 0
+    assert modified[3] & ui_module.termios.ICANON == 0
 
 
-def test_run_prepare_animation_renders_and_clears_line() -> None:
-    """Test case."""
-    calls = {"count": 0}
+def test_build_file_reporter_returns_none_on_back() -> None:
+    """Validator-based builder should return None on first ESC/back."""
+    with patch.object(file_module.TaxReporterRegistry, "deserialize_all", return_value=[]):
+        with patch.object(ui_module.questionary, "text", return_value=DummyQuestion()):
+            with patch.object(ui_module, "_ask", return_value="__back__"):
+                result = ui_module.prompt_for_tax_reporter(DummyFileReporter)
+    assert result is None
 
-    def _is_set() -> bool:
-        calls["count"] += 1
-        return calls["count"] > 1
 
-    stop = SimpleNamespace(is_set=_is_set)
-    with patch.object(app, "time") as time_mod:
-        time_mod.sleep.return_value = None
-        with patch.object(app.sys, "stdout") as stdout:
-            _call_module("_run_prepare_animation", stop)
+def test_build_file_reporter_returns_path_payload_and_details(tmp_path: Path) -> None:
+    """Validator-based builder should resolve path and build reporter instance."""
+    path = tmp_path / "input.csv"
+    path.write_text("x", encoding="utf-8")
+
+    with patch.object(file_module.TaxReporterRegistry, "deserialize_all", return_value=[]):
+        with patch.object(ui_module.questionary, "text", return_value=DummyQuestion()):
+            with patch.object(ui_module, "_ask", return_value=str(path)):
+                reporter = ui_module.prompt_for_tax_reporter(DummyFileReporter)
+
+    assert reporter is not None
+    assert isinstance(reporter, DummyFileReporter)
+    assert reporter.path == path.resolve()
+    assert reporter.details == f"File: {path.name}"
+
+
+def test_build_file_reporter_validation_rejects_blank_and_missing_path() -> None:
+    """File-input validation should reject blank and missing file paths."""
+    with patch.object(file_module.TaxReporterRegistry, "deserialize_all", return_value=[]):
+        with patch.object(ui_module.questionary, "text", return_value=DummyQuestion()) as text:
+            with patch.object(ui_module, "_ask", return_value="__back__"):
+                ui_module.prompt_for_tax_reporter(DummyFileReporter)
+
+    validate = text.call_args.kwargs["validate"]
+    assert validate("") == "This field is required."
+    assert validate("/does/not/exist.csv") == "Path must be a file."
+
+
+def test_build_file_reporter_validation_uses_reporter_specific_rule(tmp_path: Path) -> None:
+    """File-input validation should use reporter-specific extension rule."""
+    txt = tmp_path / "input.txt"
+    txt.write_text("x", encoding="utf-8")
+
+    with patch.object(file_module.TaxReporterRegistry, "deserialize_all", return_value=[]):
+        with patch.object(ui_module.questionary, "text", return_value=DummyQuestion()) as text:
+            with patch.object(ui_module, "_ask", return_value="__back__"):
+                ui_module.prompt_for_tax_reporter(DummyFileReporter)
+
+    validate = text.call_args.kwargs["validate"]
+    assert validate(str(txt)) == "Only .csv files are supported."
+
+
+def test_build_file_reporter_validation_rejects_duplicate_for_same_reporter(tmp_path: Path) -> None:
+    """File-input validation should reject already registered paths for same reporter key."""
+    path = tmp_path / "registered.csv"
+    path.write_text("x", encoding="utf-8")
+
+    entries = [
+        _entry(
+            entry_id="123456789",
+            key=DummyFileReporter.__name__,
+            title="Dummy",
+            details="File",
+            data={"path": str(path.resolve())},
+        )
+    ]
+    with patch.object(file_module.TaxReporterRegistry, "deserialize_all", return_value=entries):
+        with patch.object(ui_module.questionary, "text", return_value=DummyQuestion()) as text:
+            with patch.object(ui_module, "_ask", return_value="__back__"):
+                ui_module.prompt_for_tax_reporter(DummyFileReporter)
+
+    validate = text.call_args.kwargs["validate"]
+    assert validate(str(path.resolve())) == "File already registered for this report type."
+
+
+def test_build_file_reporter_validation_allows_same_path_for_other_reporter(tmp_path: Path) -> None:
+    """Duplicate-path protection should be scoped to selected reporter type only."""
+    path = tmp_path / "shared.csv"
+    path.write_text("x", encoding="utf-8")
+
+    with patch.object(
+        file_module.TaxReporterRegistry, "deserialize_all", return_value=[]
+    ) as read_entries:
+        with patch.object(ui_module.questionary, "text", return_value=DummyQuestion()) as text:
+            with patch.object(ui_module, "_ask", return_value="__back__"):
+                ui_module.prompt_for_tax_reporter(DummyFileReporter)
+
+    read_entries.assert_called_once_with(DummyFileReporter)
+    validate = text.call_args.kwargs["validate"]
+    assert validate(str(path.resolve())) is True
+
+
+def test_build_file_reporter_prompt_label_is_derived_from_attribute_name() -> None:
+    """Validator-based builder should derive prompt label from constructor attribute."""
+    with patch.object(file_module.TaxReporterRegistry, "deserialize_all", return_value=[]):
+        with patch.object(ui_module.questionary, "text", return_value=DummyQuestion()) as text:
+            with patch.object(ui_module, "_ask", return_value="__back__"):
+                ui_module.prompt_for_tax_reporter(DummyFileReporter)
+    assert text.call_args.args[0] == "Path [esc to back]:"
+
+
+def test_build_api_reporter_returns_none_on_back_at_query_prompt() -> None:
+    """API reporter builder should return None when query-id prompt is cancelled."""
+    with patch.object(ui_module.questionary, "text", return_value=DummyQuestion()):
+        with patch.object(ui_module, "_ask", return_value="__back__"):
+            result = ui_module.prompt_for_tax_reporter(DummyApiReporter)
+    assert result is None
+
+
+def test_build_api_reporter_returns_none_on_back_at_token_prompt() -> None:
+    """API reporter builder should return None when token prompt is cancelled."""
+    with patch.object(
+        ui_module.questionary, "text", side_effect=[DummyQuestion(), DummyQuestion()]
+    ):
+        with patch.object(ui_module, "_ask", side_effect=["123", "__back__"]):
+            result = ui_module.prompt_for_tax_reporter(DummyApiReporter)
+    assert result is None
+
+
+def test_build_api_reporter_trims_values_and_builds_payload() -> None:
+    """API reporter builder should trim query-id/token and build reporter instance."""
+    with patch.object(
+        ui_module.questionary, "text", side_effect=[DummyQuestion(), DummyQuestion()]
+    ):
+        with patch.object(ui_module, "_ask", side_effect=[" 00123 ", " tok "]):
+            reporter = ui_module.prompt_for_tax_reporter(DummyApiReporter)
+
+    assert reporter is not None
+    assert isinstance(reporter, DummyApiReporter)
+    assert reporter.query_id == "00123"
+    assert reporter.token == "tok"
+    assert reporter.details == "Query ID: 00123"
+
+
+def test_build_api_reporter_query_prompt_uses_reporter_validator() -> None:
+    """API query prompt should use base non-empty validator callback."""
+    with patch.object(ui_module.questionary, "text", return_value=DummyQuestion()) as text:
+        with patch.object(ui_module, "_ask", return_value="__back__"):
+            ui_module.prompt_for_tax_reporter(DummyApiReporter)
+
+    validate = text.call_args.kwargs["validate"]
+    assert validate("") == "Query ID is required."
+    assert validate("abc") is True
+    assert validate("123") is True
+
+
+def test_build_api_reporter_token_prompt_uses_reporter_validator() -> None:
+    """API token prompt should use reporter _validate_token callback."""
+    with patch.object(
+        ui_module.questionary, "text", side_effect=[DummyQuestion(), DummyQuestion()]
+    ) as text:
+        with patch.object(ui_module, "_ask", side_effect=["1", "__back__"]):
+            ui_module.prompt_for_tax_reporter(DummyApiReporter)
+
+    validate = text.call_args_list[1].kwargs["validate"]
+    assert validate("") == "Token is required."
+    assert validate(" token ") is True
+
+
+def test_build_employment_reporter_returns_none_on_first_back() -> None:
+    """Employment builder should return None when year prompt is cancelled."""
+    with patch.object(ui_module.questionary, "text", return_value=DummyQuestion()):
+        with patch.object(ui_module, "_ask", return_value="__back__"):
+            result = ui_module.prompt_for_tax_reporter(EmploymentTaxReporter)
+    assert result is None
+
+
+def test_build_employment_reporter_returns_none_on_midway_back() -> None:
+    """Employment builder should return None when later prompt is cancelled."""
+    with patch.object(ui_module.questionary, "text", side_effect=[DummyQuestion()] * 5):
+        with patch.object(ui_module, "_ask", side_effect=["2025", "10", "20", "__back__"]):
+            result = ui_module.prompt_for_tax_reporter(EmploymentTaxReporter)
+    assert result is None
+
+
+def test_build_employment_reporter_parses_year_and_amounts() -> None:
+    """Employment builder should cast values to expected numeric types."""
+    with patch.object(ui_module.questionary, "text", side_effect=[DummyQuestion()] * 5):
+        with patch.object(ui_module, "_ask", side_effect=["2025", "1", "2.2", "3.3", "4"]):
+            reporter = ui_module.prompt_for_tax_reporter(EmploymentTaxReporter)
+
+    assert reporter is not None
+    assert isinstance(reporter, EmploymentTaxReporter)
+    assert reporter.year == 2025
+    assert reporter.employment_revenue == 1.0
+    assert reporter.employment_cost == 2.2
+    assert reporter.social_security_contributions == 3.3
+    assert reporter.donations == 4.0
+    assert reporter.details == "Year: 2025"
+
+
+def test_build_employment_reporter_year_validator_rules() -> None:
+    """Year validator should reject blank/non-integer and accept integer values."""
+    with patch.object(ui_module.questionary, "text", return_value=DummyQuestion()) as text:
+        with patch.object(ui_module, "_ask", return_value="__back__"):
+            ui_module.prompt_for_tax_reporter(EmploymentTaxReporter)
+
+    validate = text.call_args.kwargs["validate"]
+    assert validate("") == "Year is required."
+    assert validate("abc") == "Year must be an integer."
+    assert validate("2025") is True
+
+
+def test_build_employment_reporter_amount_validator_rules() -> None:
+    """Amount validator should reject blank/non-numeric and accept numeric values."""
+    with patch.object(
+        ui_module.questionary, "text", side_effect=[DummyQuestion(), DummyQuestion()]
+    ) as text:
+        with patch.object(ui_module, "_ask", side_effect=["2025", "__back__"]):
+            ui_module.prompt_for_tax_reporter(EmploymentTaxReporter)
+
+    validate = text.call_args_list[1].kwargs["validate"]
+    assert validate("") == "Amount is required."
+    assert validate("abc") == "Amount must be a number."
+    assert validate("12") is True
+    assert validate("12.5") is True
+
+
+def test_build_employment_reporter_prompts_all_expected_labels() -> None:
+    """Employment builder should prompt all required fields in expected order."""
+    with patch.object(ui_module.questionary, "text", side_effect=[DummyQuestion()] * 5) as text:
+        with patch.object(ui_module, "_ask", side_effect=["2025", "1", "2", "3", "4"]):
+            ui_module.prompt_for_tax_reporter(EmploymentTaxReporter)
+
+    prompts = [str(call_.args[0]) for call_ in text.call_args_list]
+    assert prompts == [
+        "Year [esc to back]:",
+        "Employment Revenue [esc to back]:",
+        "Employment Cost [esc to back]:",
+        "Social Security Contributions [esc to back]:",
+        "Donations [esc to back]:",
+    ]
+
+
+def test_run_dispatches_all_menu_actions_once() -> None:
+    """run() should dispatch supported menu actions and stop on exit."""
+    app_instance = app.App()
+    with patch.object(
+        app.ui,
+        "prompt_for_main_menu_action",
+        side_effect=["register", "ls", "rm", "report", "show", "exit_app"],
+    ):
+        with patch.object(app_instance, "register") as register:
+            with patch.object(app_instance, "ls") as ls:
+                with patch.object(app_instance, "rm") as rm:
+                    with patch.object(app_instance, "report") as report:
+                        with patch.object(app_instance, "show") as show:
+                            with patch.object(app_instance, "exit_app") as exit_app:
+                                exit_app.side_effect = SystemExit
+                                with pytest.raises(SystemExit):
+                                    app_instance.run()
+
+    register.assert_called_once()
+    ls.assert_called_once()
+    rm.assert_called_once()
+    report.assert_called_once()
+    show.assert_called_once()
+    exit_app.assert_called_once()
+
+
+def test_run_clears_terminal_before_rendering_menu() -> None:
+    """run() should clear viewport and scrollback before showing main menu."""
+    app_instance = app.App()
+
+    with patch.object(app.ui, "clear_terminal_viewport") as clear_terminal:
+        with patch.object(app.ui, "prompt_for_main_menu_action", return_value="exit_app"):
+            with patch.object(app_instance, "exit_app", side_effect=SystemExit):
+                with pytest.raises(SystemExit):
+                    app_instance.run()
+
+    clear_terminal.assert_called_once_with()
+
+
+def test_run_clears_terminal_on_each_menu_iteration() -> None:
+    """run() should clear terminal at the start of each loop iteration."""
+    app_instance = app.App()
+
+    with patch.object(app.ui, "clear_terminal_viewport") as clear_terminal:
+        with patch.object(
+            app.ui, "prompt_for_main_menu_action", side_effect=["register", "exit_app"]
+        ):
+            with patch.object(app_instance, "register"):
+                with patch.object(app_instance, "exit_app", side_effect=SystemExit):
+                    with pytest.raises(SystemExit):
+                        app_instance.run()
+
+    assert clear_terminal.call_count == 2
+
+
+def test_run_menu_disables_registry_actions_when_no_entries() -> None:
+    """Main menu should disable list/rm/report actions when registry is empty."""
+    app_instance = app.App()
+    with patch.object(app.TaxReporterRegistry, "deserialize_all", return_value=[]):
+        with patch.object(app.ui.questionary, "select", return_value=DummyQuestion()) as select:
+            with patch.object(app.ui, "_ask", return_value="exit_app"):
+                with patch.object(app_instance, "exit_app", side_effect=SystemExit):
+                    with pytest.raises(SystemExit):
+                        app_instance.run()
+
+    choices = select.call_args.kwargs["choices"]
+    disabled = {choice.title: choice.disabled for choice in choices}
+    assert disabled["Register tax reporter"] is None
+    assert disabled["List tax reporters"] == "No registered tax reporters"
+    assert disabled["Remove tax reporters"] == "No registered tax reporters"
+    assert disabled["Prepare tax report"] == "No registered tax reporters"
+    assert disabled["Show tax report"] == "No prepared report in this session"
+    assert disabled["Reset tax report"] == "No prepared report in this session"
+    assert disabled["Exit"] is None
+
+
+def test_run_menu_enables_show_and_reset_when_report_is_loaded() -> None:
+    """Main menu should enable show/reset when in-session report exists."""
+    app_instance = app.App()
+    app_instance.tax_report = TaxReport()
+    reporters = [("1", DummyFileReporter("/tmp/raw.csv"))]
+
+    with patch.object(app.TaxReporterRegistry, "deserialize_all", return_value=reporters):
+        with patch.object(app.ui.questionary, "select", return_value=DummyQuestion()) as select:
+            with patch.object(app.ui, "_ask", return_value="exit_app"):
+                with patch.object(app_instance, "exit_app", side_effect=SystemExit):
+                    with pytest.raises(SystemExit):
+                        app_instance.run()
+
+    choices = select.call_args.kwargs["choices"]
+    disabled = {choice.title: choice.disabled for choice in choices}
+    assert disabled["Show tax report"] is None
+    assert disabled["Reset tax report"] is None
+
+
+def test_run_raises_for_unexpected_command() -> None:
+    """run() should fail fast for unknown menu command values."""
+    app_instance = app.App()
+    with patch.object(app.TaxReporterRegistry, "deserialize_all", return_value=[]):
+        with patch.object(app.ui.questionary, "select", return_value=DummyQuestion()):
+            with patch.object(app.ui, "_ask", return_value="boom"):
+                with pytest.raises(AttributeError, match="has no attribute 'boom'"):
+                    app_instance.run()
+
+
+def test_run_main_menu_disables_escape_back_binding() -> None:
+    """run() should call ask() with disable_escape_back=True for main menu."""
+    app_instance = app.App()
+    question = DummyQuestion()
+    with patch.object(app.TaxReporterRegistry, "deserialize_all", return_value=[]):
+        with patch.object(app.ui.questionary, "select", return_value=question):
+            with patch.object(app.ui, "_ask", return_value="exit_app") as ask:
+                with patch.object(app_instance, "exit_app", side_effect=SystemExit):
+                    with pytest.raises(SystemExit):
+                        app_instance.run()
+
+    ask.assert_called_once_with(question, disable_escape_back=True)
+
+
+def test_register_returns_without_write_on_top_level_back() -> None:
+    """register() should stop immediately when report-type selection is cancelled."""
+    app_instance = app.App()
+
+    with patch.object(app.ui.questionary, "select", return_value=DummyQuestion()):
+        with patch.object(app.ui, "_ask", return_value="__back__"):
+            with patch.object(app_instance, "_reset") as reset:
+                app_instance.register()
+
+    reset.assert_not_called()
+
+
+def test_register_file_reporter_flow_writes_entry_and_resets() -> None:
+    """register() should collect file entry, write it and reset session state."""
+    app_instance = app.App()
+    reporter = DummyFileReporter("/tmp/raw.csv")
+
+    with patch.object(app.ui.questionary, "select", return_value=DummyQuestion()):
+        with patch.object(app.ui, "_ask", return_value=DummyFileReporter):
+            with patch.object(app.ui, "prompt_for_tax_reporter", return_value=reporter) as collect:
+                with patch.object(
+                    app.TaxReporterRegistry,
+                    "serialize",
+                    return_value="123456789",
+                ) as serialize:
+                    with patch.object(app_instance, "_reset") as reset:
+                        app_instance.register()
+
+    collect.assert_called_once_with(DummyFileReporter)
+    serialize.assert_called_once_with(reporter)
+    reset.assert_called_once()
+
+
+def test_register_api_reporter_flow_writes_entry_and_resets() -> None:
+    """register() should collect API entry, write it and reset session state."""
+    app_instance = app.App()
+    reporter = IBKRTaxReporter("7", "x")
+
+    with patch.object(app.ui.questionary, "select", return_value=DummyQuestion()):
+        with patch.object(app.ui, "_ask", return_value=IBKRTaxReporter):
+            with patch.object(
+                app.ui,
+                "prompt_for_tax_reporter",
+                return_value=reporter,
+            ) as collect:
+                with patch.object(
+                    app.TaxReporterRegistry,
+                    "serialize",
+                    return_value="123456789",
+                ) as serialize:
+                    with patch.object(app_instance, "_reset") as reset:
+                        app_instance.register()
+
+    collect.assert_called_once_with(IBKRTaxReporter)
+    serialize.assert_called_once_with(reporter)
+    reset.assert_called_once()
+
+
+def test_register_employment_flow_writes_entry_and_resets() -> None:
+    """register() should collect employment entry, write it and reset session state."""
+    app_instance = app.App()
+    reporter = EmploymentTaxReporter(2025, 1.0, 2.0, 3.0, 4.0)
+
+    with patch.object(app.ui.questionary, "select", return_value=DummyQuestion()):
+        with patch.object(app.ui, "_ask", return_value=EmploymentTaxReporter):
+            with patch.object(
+                app.ui,
+                "prompt_for_tax_reporter",
+                return_value=reporter,
+            ) as collect:
+                with patch.object(
+                    app.TaxReporterRegistry,
+                    "serialize",
+                    return_value="123456789",
+                ) as serialize:
+                    with patch.object(app_instance, "_reset") as reset:
+                        app_instance.register()
+
+    collect.assert_called_once_with(EmploymentTaxReporter)
+    serialize.assert_called_once_with(reporter)
+    reset.assert_called_once()
+
+
+def test_register_retries_when_inner_collector_returns_none() -> None:
+    """register() should retry selection loop after inner collector returns None."""
+    app_instance = app.App()
+    reporter = DummyFileReporter("/tmp/raw.csv")
+
+    with patch.object(app.ui.questionary, "select", return_value=DummyQuestion()):
+        with patch.object(app.ui, "_ask", side_effect=[DummyFileReporter, DummyFileReporter]):
+            with patch.object(
+                app.ui,
+                "prompt_for_tax_reporter",
+                side_effect=[None, reporter],
+            ) as collect:
+                with patch.object(
+                    app.TaxReporterRegistry,
+                    "serialize",
+                    return_value="123456789",
+                ) as serialize:
+                    app_instance.register()
+
+    assert collect.call_args_list == [call(DummyFileReporter), call(DummyFileReporter)]
+    serialize.assert_called_once_with(reporter)
+
+
+def test_register_uses_selected_reporter_class_without_extra_type_guard() -> None:
+    """register() should rely on selected class and persist returned reporter."""
+    app_instance = app.App()
+    reporter = UnsupportedReporter()
+
+    with patch.object(app.ui.questionary, "select", return_value=DummyQuestion()):
+        with patch.object(app.ui, "_ask", return_value=UnsupportedReporter):
+            with patch.object(
+                app.ui,
+                "prompt_for_tax_reporter",
+                return_value=reporter,
+            ) as collect:
+                with patch.object(
+                    app.TaxReporterRegistry,
+                    "serialize",
+                    return_value="123456789",
+                ) as serialize:
+                    with patch.object(app_instance, "_reset") as reset:
+                        app_instance.register()
+
+    collect.assert_called_once_with(UnsupportedReporter)
+    serialize.assert_called_once_with(reporter)
+    reset.assert_called_once_with()
+
+
+def test_register_reporter_choice_order_matches_expected_names() -> None:
+    """register() prompt should use reporter registry choice ordering."""
+    app_instance = app.App()
+
+    with patch.object(app.ui.questionary, "select", return_value=DummyQuestion()) as select:
+        with patch.object(app.ui, "_ask", return_value="__back__"):
+            app_instance.register()
+
+    choices = select.call_args.kwargs["choices"]
+    assert [choice.title for choice in choices] == [
+        class_def.name() for class_def in app.TaxReporterRegistry.ls()
+    ]
+
+
+def test_register_integration_writes_registry_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """register() should write real encoded registry entry through caches layer."""
+    monkeypatch.setenv(TaxReporterRegistry._dir_env_var_name, str(tmp_path / "registry"))
+    monkeypatch.setattr(
+        tax_reporters,
+        DummyFileReporter.__name__,
+        DummyFileReporter,
+        raising=False,
+    )
+
+    app_instance = app.App()
+    reporter = DummyFileReporter(tmp_path / "raw.csv")
+
+    with patch.object(app.ui.questionary, "select", return_value=DummyQuestion()):
+        with patch.object(app.ui, "_ask", return_value=DummyFileReporter):
+            with patch.object(app.ui, "prompt_for_tax_reporter", return_value=reporter):
+                app_instance.register()
+
+    entries = TaxReporterRegistry.deserialize_all()
+    assert len(entries) == 1
+    assert entries[0][0].isdigit()
+    assert isinstance(entries[0][1], DummyFileReporter)
+    assert entries[0][1].path == (tmp_path / "raw.csv").resolve()
+
+
+def test_ls_prints_table_and_waits_for_back() -> None:
+    """ls() should print tabulated entries and wait for back prompt."""
+    app_instance = app.App()
+    question = DummyQuestion("__back__")
+    entries = [
+        _entry(
+            entry_id="000000001",
+            key="DummyFileReporter",
+            title="Raw Custom CSV",
+            details="File: raw.csv",
+            data={"path": "/tmp/raw.csv"},
+        ),
+        _entry(
+            entry_id="000000002",
+            key="IBKRTaxReporter",
+            title="Interactive Brokers",
+            details="Query ID: 1",
+            data={"query_id": "1", "token": "x"},
+        ),
+    ]
+
+    with patch.object(app.TaxReporterRegistry, "deserialize_all", return_value=entries):
+        with patch.object(app.ui.questionary, "text", return_value=question) as text:
+            with patch.object(app.ui, "_ask", return_value="__back__") as ask:
+                with patch.object(app.sys, "stdout", new=io.StringIO()) as stdout:
+                    app_instance.ls()
+
+    output = stdout.getvalue()
+    assert "ID" in output
+    assert "Tax Reporter" in output
+    assert "Dummy File" in output
+    assert "Interactive Brokers" in output
+    text.assert_called_once_with("[esc to back]", erase_when_done=True)
+    ask.assert_called_once_with(question, block_typed_input=True)
+
+
+def test_ls_handles_empty_registry_entries() -> None:
+    """ls() should still render headers for empty registry."""
+    app_instance = app.App()
+    question = DummyQuestion("__back__")
+
+    with patch.object(app.TaxReporterRegistry, "deserialize_all", return_value=[]):
+        with patch.object(app.ui.questionary, "text", return_value=question):
+            with patch.object(app.ui, "_ask", return_value="__back__"):
+                with patch.object(app.sys, "stdout", new=io.StringIO()) as stdout:
+                    app_instance.ls()
+
+    output = stdout.getvalue()
+    assert "ID" in output
+    assert "Tax Reporter" in output
+    assert "Details" in output
+
+
+def test_rm_returns_without_change_on_back() -> None:
+    """rm() should not delete entries when prompt is cancelled."""
+    app_instance = app.App()
+    entries = [
+        _entry(
+            entry_id="1",
+            key=DummyFileReporter.__name__,
+            title="T",
+            details="D",
+            data={"path": "/tmp/not-used.csv"},
+        )
+    ]
+
+    with patch.object(app.TaxReporterRegistry, "deserialize_all", return_value=entries):
+        with patch.object(app.ui.questionary, "checkbox", return_value=DummyQuestion()):
+            with patch.object(app.ui, "_ask", return_value="__back__"):
+                with patch.object(app.TaxReporterRegistry, "unregister") as unregister:
+                    with patch.object(app_instance, "_reset") as reset:
+                        app_instance.rm()
+
+    unregister.assert_not_called()
+    reset.assert_not_called()
+
+
+def test_rm_returns_without_change_on_empty_selection() -> None:
+    """rm() should not delete entries when no checkbox item is selected."""
+    app_instance = app.App()
+    entries = [
+        _entry(
+            entry_id="1",
+            key=DummyFileReporter.__name__,
+            title="T",
+            details="D",
+            data={"path": "/tmp/not-used.csv"},
+        )
+    ]
+
+    with patch.object(app.TaxReporterRegistry, "deserialize_all", return_value=entries):
+        with patch.object(app.ui.questionary, "checkbox", return_value=DummyQuestion()):
+            with patch.object(app.ui, "_ask", return_value=[]):
+                with patch.object(app.TaxReporterRegistry, "unregister") as unregister:
+                    with patch.object(app_instance, "_reset") as reset:
+                        app_instance.rm()
+
+    unregister.assert_not_called()
+    reset.assert_not_called()
+
+
+def test_rm_unregisters_selected_entries_and_resets() -> None:
+    """rm() should unregister selected entries and reset in-session report cache."""
+    app_instance = app.App()
+
+    entries = [
+        _entry(
+            entry_id="1",
+            key=DummyFileReporter.__name__,
+            title="A",
+            details="A",
+            data={"path": "/tmp/a.csv"},
+        ),
+        _entry(
+            entry_id="2",
+            key=DummyFileReporter.__name__,
+            title="B",
+            details="B",
+            data={"path": "/tmp/b.csv"},
+        ),
+    ]
+
+    with patch.object(app.TaxReporterRegistry, "deserialize_all", return_value=entries):
+        with patch.object(app.ui.questionary, "checkbox", return_value=DummyQuestion()) as checkbox:
+            with patch.object(app.ui, "_ask", return_value=["2"]):
+                with patch.object(app.TaxReporterRegistry, "unregister") as unregister:
+                    with patch.object(app_instance, "_reset") as reset:
+                        app_instance.rm()
+
+    unregister.assert_called_once_with("2")
+    reset.assert_called_once()
+
+    choice_labels = [choice.title for choice in checkbox.call_args.kwargs["choices"]]
+    assert "#1 Dummy File (File: a.csv)" in choice_labels
+    assert "#2 Dummy File (File: b.csv)" in choice_labels
+
+
+def test_rm_calls_reset_even_when_selection_matches_nothing() -> None:
+    """Non-empty selection should trigger reset even if no entry id matches."""
+    app_instance = app.App()
+
+    entries = [
+        _entry(
+            entry_id="1",
+            key=DummyFileReporter.__name__,
+            title="A",
+            details="A",
+            data={"path": "/tmp/a.csv"},
+        ),
+    ]
+
+    with patch.object(app.TaxReporterRegistry, "deserialize_all", return_value=entries):
+        with patch.object(app.ui.questionary, "checkbox", return_value=DummyQuestion()):
+            with patch.object(app.ui, "_ask", return_value=["999"]):
+                with patch.object(app.TaxReporterRegistry, "unregister") as unregister:
+                    with patch.object(app_instance, "_reset") as reset:
+                        app_instance.rm()
+
+    unregister.assert_called_once_with("999")
+    reset.assert_called_once()
+
+
+def test_report_success_sets_tax_report_state_and_calls_show(tmp_path: Path) -> None:
+    """report() should prepare in-session tax-report state and call show()."""
+    app_instance = app.App()
+    entries = [
+        _entry(
+            entry_id="1",
+            key=DummyFileReporter.__name__,
+            title=DummyFileReporter.name(),
+            details="File: raw.csv",
+            data={"path": str((tmp_path / "raw.csv").resolve())},
+        )
+    ]
+
+    with patch.object(app.TaxReporterRegistry, "deserialize_all", return_value=entries):
+        with patch.object(app.ui, "with_prepare_animation", side_effect=lambda method: method):
+            with patch.object(
+                DummyFileReporter, "generate", return_value=_report(trade_revenue=1.0)
+            ):
+                with patch.object(app_instance, "show") as show:
+                    app_instance.report()
+
+    assert app_instance.tax_report is not None
+    assert app_instance.tax_report[2025].trade_revenue == 1.0
+    assert not app_instance.logs
+    show.assert_called_once()
+
+
+def test_report_aggregates_all_supported_reporters_and_messages(tmp_path: Path) -> None:
+    """report() should instantiate each reporter key branch and aggregate generated data."""
+    app_instance = app.App()
+
+    any_path = str((tmp_path / "dummy.csv").resolve())
+    entries = [
+        _entry(
+            entry_id="1",
+            key=CharlesSchwabEmployeeSponsoredTaxReporter.__name__,
+            title=CharlesSchwabEmployeeSponsoredTaxReporter.name(),
+            details="File: schwab.json",
+            data={"path": any_path},
+        ),
+        _entry(
+            entry_id="2",
+            key=IBKRTaxReporter.__name__,
+            title=IBKRTaxReporter.name(),
+            details="Query ID: 7",
+            data={"query_id": "7", "token": "t"},
+        ),
+        _entry(
+            entry_id="3",
+            key=RevolutInterestTaxReporter.__name__,
+            title=RevolutInterestTaxReporter.name(),
+            details="File: revolut.csv",
+            data={"path": any_path},
+        ),
+        _entry(
+            entry_id="4",
+            key=CoinbaseTaxReporter.__name__,
+            title=CoinbaseTaxReporter.name(),
+            details="File: coinbase.csv",
+            data={"path": any_path},
+        ),
+        _entry(
+            entry_id="5",
+            key=EmploymentTaxReporter.__name__,
+            title=EmploymentTaxReporter.name(),
+            details="Year: 2025",
+            data={
+                "year": 2025,
+                "employment_revenue": 1.0,
+                "employment_cost": 0.0,
+                "social_security_contributions": 0.0,
+                "donations": 0.0,
+            },
+        ),
+        _entry(
+            entry_id="6",
+            key=DummyFileReporter.__name__,
+            title=DummyFileReporter.name(),
+            details="File: raw.csv",
+            data={"path": any_path},
+        ),
+    ]
+
+    def _gen(report: TaxReport, log: str):
+        def _inner(
+            self: TaxReporter,
+            logs: TaxReportLogs | None = None,
+        ) -> TaxReport:
+            if logs is not None:
+                log_date, _, log_msg = log.partition(" ")
+                action, _, detail = log_msg.partition(" ")
+                if not detail:
+                    detail = action
+                self.update_logs(
+                    datetime.strptime(log_date, "%m/%d/%Y").date(),
+                    action,
+                    detail,
+                    changes=[{"name": "Status", "before": "before", "after": "updated"}],
+                    logs=logs,
+                )
+            return report
+
+        return _inner
+
+    with patch.object(app.TaxReporterRegistry, "deserialize_all", return_value=entries):
+        with patch.object(app.ui, "with_prepare_animation", side_effect=lambda method: method):
+            with patch.object(
+                CharlesSchwabEmployeeSponsoredTaxReporter,
+                "generate",
+                _gen(_report(trade_revenue=1.0), "01/01/2025 S"),
+            ):
+                with patch.object(
+                    IBKRTaxReporter,
+                    "generate",
+                    _gen(_report(trade_revenue=2.0), "01/02/2025 I"),
+                ):
+                    with patch.object(
+                        RevolutInterestTaxReporter,
+                        "generate",
+                        _gen(_report(domestic_interest=3.0), "01/03/2025 R"),
+                    ):
+                        with patch.object(
+                            CoinbaseTaxReporter,
+                            "generate",
+                            _gen(_report(crypto_revenue=4.0), "01/04/2025 C"),
+                        ):
+                            with patch.object(
+                                EmploymentTaxReporter,
+                                "generate",
+                                _gen(_report(employment_revenue=5.0), "01/05/2025 E"),
+                            ):
+                                with patch.object(
+                                    DummyFileReporter,
+                                    "generate",
+                                    _gen(_report(trade_cost=6.0), "01/06/2025 X"),
+                                ):
+                                    with patch.object(app_instance, "show") as show:
+                                        app_instance.report()
+
+    assert app_instance.tax_report is not None
+    tax_record = app_instance.tax_report[2025]
+    assert tax_record.trade_revenue == 3.0
+    assert tax_record.trade_cost == 6.0
+    assert tax_record.crypto_revenue == 4.0
+    assert tax_record.domestic_interest == 3.0
+    assert tax_record.employment_revenue == 5.0
+    assert len(app_instance.logs) == 6
+    assert any("01/01/2025" in log for log in app_instance.logs)
+    assert any("01/06/2025" in log for log in app_instance.logs)
+    show.assert_called_once()
+
+
+def test_report_failure_for_invalid_reporter_object_prints_frame_and_waits_back() -> None:
+    """Invalid deserialized reporter should show framed error output."""
+    app_instance = app.App()
+    question = DummyQuestion("__back__")
+    entries = [("1", object())]
+    with patch.object(
+        app.TaxReporterRegistry,
+        "deserialize_all",
+        return_value=entries,
+    ):
+        with patch.object(app.ui, "with_prepare_animation", side_effect=lambda method: method):
+            with patch.object(app.ui.questionary, "text", return_value=question) as text:
+                with patch.object(app.ui, "_ask", return_value="__back__") as ask:
+                    with patch.object(app_instance, "show") as show:
+                        with patch.object(app.sys, "stdout", new=io.StringIO()) as stdout:
+                            app_instance.report()
+
+    output = stdout.getvalue()
+    assert "Traceback (most recent call last):" in output
+    assert "generate" in output
+    assert "\x1b[31m┌" in output
+    text.assert_called_once_with("[esc to back]", erase_when_done=True)
+    ask.assert_called_once_with(question, block_typed_input=True)
+    show.assert_not_called()
+
+
+def test_report_failure_from_generate_exception_prints_frame_and_waits_back(tmp_path: Path) -> None:
+    """Reporter generate() exceptions should be framed and handled without crash."""
+    app_instance = app.App()
+    question = DummyQuestion("__back__")
+    entries = [
+        _entry(
+            entry_id="1",
+            key=DummyFileReporter.__name__,
+            title=DummyFileReporter.name(),
+            details="File: raw.csv",
+            data={"path": str((tmp_path / "raw.csv").resolve())},
+        )
+    ]
+
+    with patch.object(app.TaxReporterRegistry, "deserialize_all", return_value=entries):
+        with patch.object(app.ui, "with_prepare_animation", side_effect=lambda method: method):
+            with patch.object(DummyFileReporter, "generate", side_effect=RuntimeError("boom")):
+                with patch.object(app.ui.questionary, "text", return_value=question) as text:
+                    with patch.object(app.ui, "_ask", return_value="__back__") as ask:
+                        with patch.object(app_instance, "show") as show:
+                            with patch.object(app.sys, "stdout", new=io.StringIO()) as stdout:
+                                app_instance.report()
+
+    output = stdout.getvalue()
+    assert "Traceback (most recent call last):" in output
+    assert "boom" in output
+    text.assert_called_once_with("[esc to back]", erase_when_done=True)
+    ask.assert_called_once_with(question, block_typed_input=True)
+    show.assert_not_called()
+
+
+def test_report_uses_prepare_animation_wrapper() -> None:
+    """report() should execute report preparation via UI wrapper."""
+    app_instance = app.App()
+    entries = [("1", DummyFileReporter("/tmp/raw.csv"))]
+
+    with patch.object(app.TaxReporterRegistry, "deserialize_all", return_value=entries):
+        with patch.object(
+            app.ui, "with_prepare_animation", side_effect=lambda method: method
+        ) as wrapper:
+            with patch.object(DummyFileReporter, "generate", return_value=TaxReport()):
+                with patch.object(app_instance, "show"):
+                    app_instance.report()
+
+    wrapper.assert_called_once()
+
+
+def test_report_overwrites_previous_messages_and_tax_report() -> None:
+    """report() success path should replace previous in-memory report and messages."""
+    app_instance = app.App()
+    app_instance.tax_report = _report(trade_revenue=999.0)
+    app_instance.logs = TaxReportLogs()
+    app_instance.logs.add(datetime(2025, 1, 1).date(), "old log")
+    entries = [("1", DummyFileReporter("/tmp/raw.csv"))]
+
+    with patch.object(app.TaxReporterRegistry, "deserialize_all", return_value=entries):
+        with patch.object(app.ui, "with_prepare_animation", side_effect=lambda method: method):
+            with patch.object(
+                DummyFileReporter, "generate", return_value=_report(trade_revenue=1.0)
+            ):
+                with patch.object(app_instance, "show"):
+                    app_instance.report()
+
+    assert app_instance.tax_report is not None
+    assert app_instance.tax_report[2025].trade_revenue == 1.0
+    assert app_instance.logs == ["old log"]
+
+
+def test_with_prepare_animation_writes_spinner_and_clear_line() -> None:
+    """UI decorator should emit progress line and clear final line."""
+
+    class FakeEvent:
+        """Threading event double controlling animation loop lifecycle."""
+
+        def __init__(self) -> None:
+            """Initialize event state."""
+            self.flag = False
+            self.calls = 0
+
+        def is_set(self) -> bool:
+            """Return whether animation should stop."""
+            self.calls += 1
+            return self.flag or self.calls > 1
+
+        def set(self) -> None:
+            """Signal animation loop stop."""
+            self.flag = True
+
+    class FakeThread:
+        """Thread double that runs target synchronously."""
+
+        def __init__(self, *, target: Any, daemon: bool) -> None:
+            """Store thread target and daemon marker."""
+            self.target = target
+            self.daemon = daemon
+
+        def start(self) -> None:
+            """Execute target immediately."""
+            self.target()
+
+        def join(self) -> None:
+            """No-op join for synchronous execution."""
+            return
+
+    @ui_module.with_prepare_animation
+    def _task() -> None:
+        return
+
+    with patch.object(ui_module, "_disable_tty_input_echo", return_value=_fake_context()):
+        with patch.object(ui_module.threading, "Event", return_value=FakeEvent()):
+            with patch.object(
+                ui_module.threading,
+                "Thread",
+                side_effect=lambda target, daemon: FakeThread(target=target, daemon=daemon),
+            ):
+                with patch.object(ui_module.time, "sleep", return_value=None):
+                    with patch.object(ui_module.sys, "stdout") as stdout:
+                        _task()
+
     writes = [str(call_.args[0]) for call_ in stdout.write.call_args_list]
     assert any("Preparing tax summary" in value for value in writes)
     assert any("\x1b[2K" in value for value in writes)
 
 
-@patch("src.app.questionary.select")
-def test_prompt_main_action_with_no_registries_disables_registry_actions(select: Mock) -> None:
-    """Test case."""
-    app_instance = app.PolishPitConsoleApp()
-    select.return_value = object()
-    with patch.object(app, "_load_registered_entries", return_value=[]):
-        with patch.object(app, "_ask", return_value="register"):
-            action = _call_method(app_instance, "_prompt_main_action")
-    assert action == "register"
-    choices = select.call_args.kwargs["choices"]
-    assert choices[1].disabled == "No registered tax reporters"
-    assert choices[2].disabled == "No registered tax reporters"
-    assert choices[3].disabled == "No registered tax reporters"
-    assert choices[4].disabled == "No prepared report in this session"
-
-
-@patch("src.app.questionary.select")
-def test_prompt_main_action_with_registries_enables_registry_actions(select: Mock) -> None:
-    """Test case."""
-    app_instance = app.PolishPitConsoleApp()
-    select.return_value = object()
-    with patch.object(
-        app,
-        "_load_registered_entries",
-        return_value=[cast(app.RegisteredTaxReportEntry, {})],
-    ):
-        with patch.object(app, "_ask", return_value="report"):
-            action = _call_method(app_instance, "_prompt_main_action")
-    assert action == "report"
-    choices = select.call_args.kwargs["choices"]
-    assert [choice.title for choice in choices] == (
-        "Register tax reporter|List tax reporters|Remove tax reporters|Prepare tax report|"
-        "Show tax report|Exit"
-    ).split("|")
-    assert choices[1].disabled is None
-    assert choices[2].disabled is None
-    assert choices[3].disabled is None
-    assert choices[4].disabled == "No prepared report in this session"
-
-
-@patch("src.app.questionary.select")
-def test_prompt_main_action_enables_show_when_session_report_exists(select: Mock) -> None:
-    """Test case."""
-    app_instance = app.PolishPitConsoleApp()
-    app_instance.tax_report = TaxReport()
-    select.return_value = object()
-    with patch.object(app, "_load_registered_entries", return_value=[]):
-        with patch.object(app, "_ask", return_value="show"):
-            action = _call_method(app_instance, "_prompt_main_action")
-    assert action == "show"
-    choices = select.call_args.kwargs["choices"]
-    assert choices[4].disabled is None
-
-
-@patch("src.app.questionary.select")
-def test_select_report_spec_back(select: Mock) -> None:
-    """Test case."""
-    app_instance = app.PolishPitConsoleApp()
-    select.return_value = object()
-    with patch.object(app, "_bind_escape_back", side_effect=lambda q: q):
-        with patch.object(app, "_ask", return_value="__back__"):
-            result = _call_method(app_instance, "_select_report_spec")
-    assert result == "__back__"
-
-
-@patch("src.app.questionary.select")
-def test_select_report_spec_returns_selected_spec(select: Mock) -> None:
-    """Test case."""
-    app_instance = app.PolishPitConsoleApp()
-    select.return_value = object()
-    selected = ("ib_trade_cash", "Interactive Brokers Trade Cash", "api", DummyApiReporter)
-    with patch.object(app, "_bind_escape_back", side_effect=lambda q: q):
-        with patch.object(app, "_ask", return_value=selected):
-            result = _call_method(app_instance, "_select_report_spec")
-    assert result == selected
-
-
-@patch("src.app.questionary.text")
-def test_collect_api_entry_back_on_query(text: Mock) -> None:
-    """Test case."""
-    app_instance = app.PolishPitConsoleApp()
-    text.return_value = object()
-    with patch.object(app, "_bind_escape_back", side_effect=lambda q: q):
-        with patch.object(app, "_ask", return_value="__back__"):
-            result = _call_method(app_instance, "_collect_api_entry", "k", "t", DummyApiReporter)
-    assert result is None
-
-
-@patch("src.app.questionary.text")
-def test_collect_api_entry_normalizes_query_and_token(text: Mock) -> None:
-    """Test case."""
-    app_instance = app.PolishPitConsoleApp()
-    text.side_effect = [object(), object()]
-    with patch.object(app, "_bind_escape_back", side_effect=lambda q: q):
-        with patch.object(app, "_ask", side_effect=["00123", " tok "]):
-            entry = _call_method(app_instance, "_collect_api_entry", "k", "t", DummyApiReporter)
-    assert entry is not None
-    data = cast(app.ApiTaxReportData, entry["tax_report_data"])
-    assert data["query_id"] == "123"
-    assert data["token"] == "tok"
-
-
-@patch("src.app.questionary.text")
-def test_collect_api_entry_query_validation(text: Mock) -> None:
-    """Test case."""
-    app_instance = app.PolishPitConsoleApp()
-    text.return_value = object()
-    with patch.object(app, "_bind_escape_back", side_effect=lambda q: q):
-        with patch.object(app, "_ask", return_value="__back__"):
-            _call_method(app_instance, "_collect_api_entry", "k", "t", DummyApiReporter)
-    validate = text.call_args.kwargs["validate"]
-    assert validate("") == "Query ID is required."
-    assert validate("abc") == "Query ID must be an integer."
-    assert validate("123") is True
-
-
-@patch("src.app.questionary.text")
-def test_collect_api_entry_token_back_returns_none(text: Mock) -> None:
-    """Test case."""
-    app_instance = app.PolishPitConsoleApp()
-    text.side_effect = [object(), object()]
-    with patch.object(app, "_bind_escape_back", side_effect=lambda q: q):
-        with patch.object(app, "_ask", side_effect=["123", "__back__"]):
-            result = _call_method(app_instance, "_collect_api_entry", "k", "t", DummyApiReporter)
-    assert result is None
-
-
-@patch("src.app.questionary.text")
-def test_collect_api_entry_token_validation(text: Mock) -> None:
-    """Test case."""
-    app_instance = app.PolishPitConsoleApp()
-    text.side_effect = [object(), object()]
-    with patch.object(app, "_bind_escape_back", side_effect=lambda q: q):
-        with patch.object(app, "_ask", side_effect=["123", "__back__"]):
-            _call_method(app_instance, "_collect_api_entry", "k", "t", DummyApiReporter)
-    validate = text.call_args_list[1].kwargs["validate"]
-    assert validate("") == "This field is required."
-    assert validate(" token ") is True
-
-
-@patch("src.app.questionary.text")
-def test_collect_file_entry_back(text: Mock) -> None:
-    """Test case."""
-    app_instance = app.PolishPitConsoleApp()
-    text.return_value = object()
-    with patch.object(app, "_load_registered_entries", return_value=[]):
-        with patch.object(app, "_bind_escape_back", side_effect=lambda q: q):
-            with patch.object(app, "_ask", return_value="__back__"):
-                result = _call_method(
-                    app_instance, "_collect_file_entry", "k", "t", DummyFileReporter
-                )
-    assert result is None
-
-
-@patch("src.app.questionary.text")
-def test_collect_file_entry_returns_resolved_path(text: Mock) -> None:
-    """Test case."""
-    app_instance = app.PolishPitConsoleApp()
-    text.return_value = object()
-    with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "file.csv"
-        path.write_text("x", encoding="utf-8")
-        with patch.object(app, "_load_registered_entries", return_value=[]):
-            with patch.object(app, "_bind_escape_back", side_effect=lambda q: q):
-                with patch.object(app, "_ask", return_value=str(path)):
-                    entry = _call_method(
-                        app_instance, "_collect_file_entry", "k", "t", DummyFileReporter
-                    )
-    assert entry is not None
-    assert entry["tax_report_data"] == path.resolve()
-
-
-@patch("src.app.questionary.text")
-def test_collect_file_entry_validation_rules(text: Mock) -> None:
-    """Test case."""
-    app_instance = app.PolishPitConsoleApp()
-    text.return_value = object()
-    with patch.object(app, "_load_registered_entries", return_value=[]):
-        with patch.object(app, "_bind_escape_back", side_effect=lambda q: q):
-            with patch.object(app, "_ask", return_value="__back__"):
-                _call_method(app_instance, "_collect_file_entry", "k", "t", DummyFileReporter)
-    validate = text.call_args.kwargs["validate"]
-    assert validate("") == "This field is required."
-    assert validate("/no/such/file.csv") == "Path must be a file."
-    with tempfile.TemporaryDirectory() as tmp:
-        txt_path = Path(tmp) / "x.txt"
-        txt_path.write_text("x", encoding="utf-8")
-        assert validate(str(txt_path)) == "Only .csv files are supported."
-        csv_path = Path(tmp) / "x.csv"
-        csv_path.write_text("x", encoding="utf-8")
-        assert validate(str(csv_path)) is True
-    file_filter = text.call_args.kwargs["completer"].file_filter
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp_dir = Path(tmp)
-        csv_path = tmp_dir / "y.csv"
-        csv_path.write_text("x", encoding="utf-8")
-        assert file_filter(str(tmp_dir)) is True
-        assert file_filter(str(csv_path)) is True
-        txt_path = tmp_dir / "y.txt"
-        txt_path.write_text("x", encoding="utf-8")
-        assert file_filter(str(txt_path)) is False
-
-
-@patch("src.app.questionary.text")
-def test_collect_file_entry_rejects_already_registered_path(text: Mock) -> None:
-    """Test case."""
-    app_instance = app.PolishPitConsoleApp()
-    text.return_value = object()
-    with tempfile.TemporaryDirectory() as tmp:
-        csv_path = Path(tmp) / "registered.csv"
-        csv_path.write_text("x", encoding="utf-8")
-        existing_entry: app.RegisteredTaxReportEntry = {
-            "entry_id": 1,
-            "tax_report_key": "k",
-            "report_title": "t",
-            "report_kind": "files",
-            "report_cls": DummyFileReporter,
-            "tax_report_data": csv_path.resolve(),
-            "created_at": 1,
-            "registry_path": Path(tmp) / "1.yaml",
-        }
-        with patch.object(app, "_load_registered_entries", return_value=[existing_entry]):
-            with patch.object(app, "_bind_escape_back", side_effect=lambda q: q):
-                with patch.object(app, "_ask", return_value="__back__"):
-                    _call_method(app_instance, "_collect_file_entry", "k", "t", DummyFileReporter)
-        validate = text.call_args.kwargs["validate"]
-        assert validate(str(csv_path)) == "File already registered for this report type."
-        file_filter = text.call_args.kwargs["completer"].file_filter
-        assert file_filter(str(csv_path)) is False
-
-
-def test_collect_submission_entry_retries_after_back_from_inner() -> None:
-    """Test case."""
-    app_instance = app.PolishPitConsoleApp()
-    spec = ("k", "title", "files", DummyFileReporter)
-    entry = {
-        "tax_report_key": "k",
-        "report_title": "title",
-        "report_kind": "files",
-        "report_cls": DummyFileReporter,
-        "tax_report_data": Path("/tmp/x.csv"),
-    }
-    with patch.object(app_instance, "_select_report_spec", side_effect=[spec, spec]):
-        with patch.object(app_instance, "_collect_file_entry", side_effect=[None, entry]):
-            result = _call_method(app_instance, "_collect_submission_entry")
-    assert result == entry
-
-
-def test_collect_submission_entry_returns_none_on_top_level_back() -> None:
-    """Test case."""
-    app_instance = app.PolishPitConsoleApp()
-    with patch.object(app_instance, "_select_report_spec", return_value="__back__"):
-        result = _call_method(app_instance, "_collect_submission_entry")
-    assert result is None
-
-
-def test_collect_submission_entry_uses_api_collector() -> None:
-    """Test case."""
-    app_instance = app.PolishPitConsoleApp()
-    spec = ("ib_trade_cash", "Interactive Brokers Trade Cash", "api", DummyApiReporter)
-    entry = {
-        "tax_report_key": "ib_trade_cash",
-        "report_title": "Interactive Brokers Trade Cash",
-        "report_kind": "api",
-        "report_cls": DummyApiReporter,
-        "tax_report_data": {"query_id": "1", "token": "x"},
-    }
-    with patch.object(app_instance, "_select_report_spec", return_value=spec):
-        with patch.object(app_instance, "_collect_api_entry", return_value=entry) as api_collect:
-            result = _call_method(app_instance, "_collect_submission_entry")
-    api_collect.assert_called_once()
-    assert result == entry
-
-
-def _encode(content: str) -> str:
-    return b64encode(content.encode("utf-8")).decode("ascii")
-
-
-def _decode(content: str) -> str:
-    return b64decode(content.encode("ascii"), validate=True).decode("utf-8")
-
-
-def _ensure_registry_directory() -> Path:
-    path = getattr(caches, "_registry_dir")()
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.chmod(0o700)
-    return path
-
-
-def test_registry_payload_base64_roundtrip_and_invalid_decode() -> None:
-    """Test case."""
-    content = "query_id: 7\ntoken: abc\n"
-    encoded = _encode(content)
-    assert encoded != content
-    assert _decode(encoded) == content
-    with pytest.raises(Exception):
-        _decode("%%%")
-
-
-def test_register_writes_with_mocked_id_source_even_with_invalid_files_present() -> None:
-    """Test case."""
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        with patch.dict(app.os.environ, {caches.REGISTRY_DIR_ENV_VAR: tmp_dir}, clear=False):
-            registry = _ensure_registry_directory()
-            (registry / "subdir").mkdir()
-            (registry / "invalid-name.txt").write_text("x", encoding="utf-8")
-            (registry / "0000--unknown.path").write_text("x", encoding="utf-8")
-            (registry / "0001--ib_trade_cash.path").write_text("x", encoding="utf-8")
-            (registry / "0002--raw_custom_csv.path").write_text("", encoding="utf-8")
-            (registry / "0003--raw_custom_csv.path").write_text(
-                "%%%not-base64%%%", encoding="utf-8"
-            )
-            (registry / "0004--raw_custom_csv.path").write_text(_encode("   "), encoding="utf-8")
-            (registry / "0005--ib_trade_cash.yaml").write_text(
-                _encode("# comment\nbroken_line\nquery_id: 9\ntoken: t\n"),
-                encoding="utf-8",
-            )
-            (registry / "0006--ib_trade_cash.yaml").write_text(
-                _encode("query_id: 1"), encoding="utf-8"
-            )
-            source = Path(tmp_dir) / "register.csv"
-            source.write_text("x", encoding="utf-8")
-            entry_file: app.TaxReportEntry = {
-                "tax_report_key": "ib_trade_cash",
-                "report_title": "Interactive Brokers Trade Cash",
-                "report_kind": "api",
-                "report_cls": app.IBTradeCashTaxReporter,
-                "tax_report_data": {"query_id": "12", "token": "tok"},
-            }
-            with patch.object(app, "read_registry_entry_ids", return_value=[]):
-                with patch.object(app, "uuid4", return_value=SimpleNamespace(int=333_333_333_333)):
-                    with patch.object(app.time, "time_ns", return_value=7):
-                        with patch.object(
-                            app.PolishPitConsoleApp,
-                            "_collect_submission_entry",
-                            return_value=entry_file,
-                        ):
-                            app.PolishPitConsoleApp().register()
-            created_file = registry / "433333333.yaml"
-            assert created_file.is_file()
-
-
-def test_register_returns_without_writing_on_cancel() -> None:
-    """Test case."""
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        with patch.dict(app.os.environ, {caches.REGISTRY_DIR_ENV_VAR: tmp_dir}, clear=False):
-            registry = _ensure_registry_directory()
-            with patch.object(
-                app.PolishPitConsoleApp,
-                "_collect_submission_entry",
-                return_value=None,
-            ):
-                app.PolishPitConsoleApp().register()
-            assert sorted(path.name for path in registry.iterdir()) == []
-
-
-def test_register_writes_without_loading_existing_entries() -> None:
-    """Test case."""
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        with patch.dict(app.os.environ, {caches.REGISTRY_DIR_ENV_VAR: tmp_dir}, clear=False):
-            registry = _ensure_registry_directory()
-            source = Path(tmp_dir) / "x.csv"
-            source.write_text("x", encoding="utf-8")
-            (registry / "0001--raw_custom_csv.yaml").write_text(
-                _encode(f"path: {source.resolve()}\n"),
-                encoding="utf-8",
-            )
-            (registry / "0001--ib_trade_cash.yaml").write_text(
-                _encode("query_id: 1\ntoken: t\n"),
-                encoding="utf-8",
-            )
-            entry_file: app.TaxReportEntry = {
-                "tax_report_key": "ib_trade_cash",
-                "report_title": "Interactive Brokers Trade Cash",
-                "report_kind": "api",
-                "report_cls": app.IBTradeCashTaxReporter,
-                "tax_report_data": {"query_id": "12", "token": "tok"},
-            }
-            with patch.object(app, "uuid4", return_value=SimpleNamespace(int=111_111_111_111)):
-                with patch.object(app.time, "time_ns", return_value=9):
-                    with patch.object(
-                        app.PolishPitConsoleApp,
-                        "_collect_submission_entry",
-                        return_value=entry_file,
-                    ):
-                        app.PolishPitConsoleApp().register()
-            created_file = registry / "511111111.yaml"
-            assert created_file.is_file()
-            decoded = _decode(created_file.read_text(encoding="utf-8"))
-            assert yaml.safe_load(decoded) == {
-                "tax_report_key": "ib_trade_cash",
-                "query_id": "12",
-                "token": "tok",
-                "created_at": 9,
-            }
-
-
-def test_register_writes_file_and_api_entries() -> None:
-    """Test case."""
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        with patch.dict(app.os.environ, {caches.REGISTRY_DIR_ENV_VAR: tmp_dir}, clear=False):
-            source = Path(tmp_dir) / "ib.csv"
-            source.write_text("x", encoding="utf-8")
-            entry_file: app.TaxReportEntry = {
-                "tax_report_key": "raw_custom_csv",
-                "report_title": "Raw Custom CSV",
-                "report_kind": "files",
-                "report_cls": app.RawTaxReporter,
-                "tax_report_data": source,
-            }
-            with patch.object(app, "read_registry_entry_ids", return_value=[]):
-                with patch.object(app, "uuid4", return_value=SimpleNamespace(int=123_456_789_012)):
-                    with patch.object(app.time, "time_ns", return_value=10):
-                        with patch.object(
-                            app.PolishPitConsoleApp,
-                            "_collect_submission_entry",
-                            return_value=entry_file,
-                        ):
-                            app.PolishPitConsoleApp().register()
-
-            first_file = getattr(caches, "_registry_dir")() / "256789012.yaml"
-            assert first_file.is_file()
-            decoded = _decode(first_file.read_text(encoding="utf-8"))
-            assert decoded is not None
-            assert yaml.safe_load(decoded) == {
-                "tax_report_key": "raw_custom_csv",
-                "path": str(source.resolve()),
-                "created_at": 10,
-            }
-
-            entry_api: app.TaxReportEntry = {
-                "tax_report_key": "ib_trade_cash",
-                "report_title": "Interactive Brokers Trade Cash",
-                "report_kind": "api",
-                "report_cls": app.IBTradeCashTaxReporter,
-                "tax_report_data": {"query_id": "12", "token": "tok"},
-            }
-            with patch.object(app, "read_registry_entry_ids", return_value=[256_789_012]):
-                with patch.object(app, "uuid4", return_value=SimpleNamespace(int=987_654_321_098)):
-                    with patch.object(app.time, "time_ns", return_value=20):
-                        with patch.object(
-                            app.PolishPitConsoleApp,
-                            "_collect_submission_entry",
-                            return_value=entry_api,
-                        ):
-                            app.PolishPitConsoleApp().register()
-
-            second_file = getattr(caches, "_registry_dir")() / "454321098.yaml"
-            assert second_file.is_file()
-            decoded = _decode(second_file.read_text(encoding="utf-8"))
-            assert decoded is not None
-            assert yaml.safe_load(decoded) == {
-                "tax_report_key": "ib_trade_cash",
-                "query_id": "12",
-                "token": "tok",
-                "created_at": 20,
-            }
-
-
-def test_ls_empty_and_populated_outputs() -> None:
-    """Test case."""
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        registry_dir = Path(tmp_dir) / "registry"
-        with patch.dict(
-            app.os.environ,
-            {caches.REGISTRY_DIR_ENV_VAR: str(registry_dir)},
-            clear=False,
-        ):
-            with patch("src.app.questionary.text", return_value=SimpleNamespace()) as text_prompt:
-                with patch.object(app, "_bind_escape_back", side_effect=lambda q: q):
-                    with patch.object(app, "_ask", return_value="__back__") as ask:
-                        with patch.object(app, "_clear_last_lines") as clear_last_lines:
-                            with patch.object(app.sys, "stdout", new=io.StringIO()) as out:
-                                app.PolishPitConsoleApp().ls()
-            output = out.getvalue()
-            assert "ID" in output
-            assert "Tax report" in output
-            assert text_prompt.call_count == 1
-            ask.assert_called_once()
-            clear_last_lines.assert_called_once()
-
-            registry = _ensure_registry_directory()
-            source = Path(tmp_dir) / "raw.csv"
-            source.write_text("year,description,trade_revenue\n2025,x,1\n", encoding="utf-8")
-            (registry / "1.yaml").write_text(
-                _encode(
-                    f"tax_report_key: raw_custom_csv\npath: {source.resolve()}\ncreated_at: 20\n"
-                ),
-                encoding="utf-8",
-            )
-            (registry / "2.yaml").write_text(
-                _encode("tax_report_key: ib_trade_cash\nquery_id: 5\ntoken: t\ncreated_at: 10\n"),
-                encoding="utf-8",
-            )
-            with patch("src.app.questionary.text", return_value=object()) as text_prompt:
-                with patch.object(app, "_bind_escape_back", side_effect=lambda q: q):
-                    with patch.object(app, "_ask", return_value="__back__"):
-                        with patch.object(app, "_clear_last_lines") as clear_last_lines:
-                            with patch.object(app.sys, "stdout", new=io.StringIO()) as out:
-                                app.PolishPitConsoleApp().ls()
-            output = out.getvalue()
-            assert "Raw Custom CSV" in output
-            assert "Interactive Brokers Trade Cash" in output
-            assert "000000001" in output
-            assert "000000002" in output
-            assert output.find("Interactive Brokers Trade Cash") < output.find("Raw Custom CSV")
-            assert text_prompt.call_count == 1
-            clear_last_lines.assert_called_once()
-            assert clear_last_lines.call_args.args[0] > 0
-
-
-@patch("src.app.questionary.checkbox")
-def test_rm_empty_cancel_no_selection_and_success_paths(checkbox: Mock) -> None:
-    """Test case."""
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        registry_dir = Path(tmp_dir) / "registry"
-        with patch.dict(
-            app.os.environ,
-            {caches.REGISTRY_DIR_ENV_VAR: str(registry_dir)},
-            clear=False,
-        ):
-            with patch("src.app.questionary.select", return_value=object()) as select:
-                with patch.object(app, "_ask", return_value="__back__") as ask:
-                    app.PolishPitConsoleApp().rm()
-            select.assert_not_called()
-            ask.assert_called_once()
-
-            registry = _ensure_registry_directory()
-            source = Path(tmp_dir) / "raw.csv"
-            source.write_text("year,description,trade_revenue\n2025,x,1\n", encoding="utf-8")
-            (registry / "1.yaml").write_text(
-                _encode(f"tax_report_key: raw_custom_csv\npath: {source.resolve()}\n"),
-                encoding="utf-8",
-            )
-            (registry / "2.yaml").write_text(
-                _encode("tax_report_key: ib_trade_cash\nquery_id: 5\ntoken: t\n"),
-                encoding="utf-8",
-            )
-
-            checkbox.return_value = object()
-
-            with patch.object(app, "_bind_escape_back", side_effect=lambda q: q):
-                with patch.object(app, "_ask", return_value="__back__"):
-                    app.PolishPitConsoleApp().rm()
-            assert (registry / "1.yaml").exists()
-            assert (registry / "2.yaml").exists()
-
-            with patch.object(app, "_bind_escape_back", side_effect=lambda q: q):
-                with patch.object(app, "_ask", return_value=[]):
-                    with patch.object(app.sys, "stdout", new=io.StringIO()) as out:
-                        app.PolishPitConsoleApp().rm()
-            assert out.getvalue() == ""
-            assert (registry / "1.yaml").exists()
-            assert (registry / "2.yaml").exists()
-
-            app_instance = app.PolishPitConsoleApp()
-            app_instance.tax_report = TaxReport({2025: TaxRecord(trade_revenue=1.0)})
-            with patch.object(app, "_bind_escape_back", side_effect=lambda q: q):
-                with patch.object(app, "_ask", return_value=[999]):
-                    with patch.object(app.sys, "stdout", new=io.StringIO()) as out:
-                        app_instance.rm()
-            assert out.getvalue() == ""
-            assert app_instance.tax_report is not None
-            assert (registry / "1.yaml").exists()
-            assert (registry / "2.yaml").exists()
-
-            with patch.object(app, "_bind_escape_back", side_effect=lambda q: q):
-                with patch.object(app, "_ask", return_value=[2]):
-                    with patch.object(app.sys, "stdout", new=io.StringIO()) as out:
-                        app.PolishPitConsoleApp().rm()
-            assert out.getvalue() == ""
-            assert (registry / "1.yaml").exists()
-            assert not (registry / "2.yaml").exists()
-
-            choice_labels = [choice.title for choice in checkbox.call_args.kwargs["choices"]]
-            assert any(label.startswith("#000000001 Raw Custom CSV") for label in choice_labels)
-            assert any(
-                label.startswith("#000000002 Interactive Brokers Trade Cash")
-                for label in choice_labels
-            )
-
-
-def test_report_empty_and_populated_behavior() -> None:
-    """Test case."""
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        registry_dir = Path(tmp_dir) / "registry"
-        with patch.dict(
-            app.os.environ,
-            {caches.REGISTRY_DIR_ENV_VAR: str(registry_dir)},
-            clear=False,
-        ):
-            with patch.object(app.sys, "stdout", new=io.StringIO()) as out:
-                app.PolishPitConsoleApp().report()
-            assert "No registered tax reporters." in out.getvalue()
-
-            registry = _ensure_registry_directory()
-            source = Path(tmp_dir) / "raw.csv"
-            source.write_text("year,description,trade_revenue\n2025,x,10\n", encoding="utf-8")
-            (registry / "1.yaml").write_text(
-                _encode(f"tax_report_key: raw_custom_csv\npath: {source.resolve()}\n"),
-                encoding="utf-8",
-            )
-            (registry / "2.yaml").write_text(
-                _encode("tax_report_key: ib_trade_cash\nquery_id: 1\ntoken: t\n"),
-                encoding="utf-8",
-            )
-            api_report = TaxReport({2025: TaxRecord(trade_revenue=5.0)})
-            with patch.object(app.IBTradeCashTaxReporter, "generate", return_value=api_report):
-                with patch.object(app, "_run_prepare_animation", side_effect=lambda stop: None):
-                    app_instance = app.PolishPitConsoleApp()
-                with patch.object(app.sys.stdin, "fileno", return_value=0):
-                    with patch.object(app.os, "isatty", return_value=False):
-                        with patch("src.app.questionary.text", return_value=object()):
-                            with patch.object(app, "_bind_escape_back", side_effect=lambda q: q):
-                                with patch.object(app, "_ask", return_value="__back__"):
-                                    with patch.object(app.sys, "stdout", new=io.StringIO()) as out:
-                                        app_instance.report()
-            assert (
-                "2025" in out.getvalue()
-                and app_instance.tax_report is not None
-                and app_instance.pending_clear_lines == 0
-            )
-            with patch.object(app_instance, "_build_tax_report", return_value=None):
-                with patch.object(app, "_run_prepare_animation", side_effect=lambda stop: None):
-                    with patch.object(app.sys.stdin, "fileno", return_value=0):
-                        with patch.object(app.os, "isatty", return_value=False):
-                            with patch.object(app.sys, "stdout", new=io.StringIO()):
-                                app_instance.report()
-            for prompt in (SimpleNamespace(), object()):
-                with patch.object(
-                    app.IBTradeCashTaxReporter, "generate", side_effect=RuntimeError("boom")
-                ):
-                    with patch.object(app, "_run_prepare_animation", side_effect=lambda stop: None):
-                        with patch.object(app.sys.stdin, "fileno", return_value=0):
-                            with patch.object(app.os, "isatty", return_value=False):
-                                with patch("src.app.questionary.text", return_value=prompt):
-                                    with patch.object(
-                                        app, "_bind_escape_back", side_effect=lambda q: q
-                                    ):
-                                        with patch.object(app, "_ask", return_value="__back__"):
-                                            with patch.object(
-                                                app.sys, "stdout", new=io.StringIO()
-                                            ) as out:
-                                                app_instance.report()
-                assert "Prepare report failed:" in out.getvalue()
-
-
-def test_run_clears_pending_lines_before_prompt() -> None:
-    """Test case."""
-    app_instance = app.PolishPitConsoleApp()
-    app_instance.pending_full_clear = True
-    app_instance.pending_clear_lines = 3
-    with patch.object(app_instance, "_prompt_main_action", return_value="exit"):
-        with patch.object(app, "prompt_toolkit_clear") as prompt_toolkit_clear:
-            with patch.object(app.sys, "stdout") as stdout:
-                with patch.object(app, "_clear_last_lines") as clear_last_lines:
-                    with pytest.raises(SystemExit):
-                        app_instance.run()
-    prompt_toolkit_clear.assert_called_once_with()
-    assert stdout.write.call_args_list == [call("\x1b[3J\x1b[2J\x1b[H")]
-    stdout.flush.assert_called_once_with()
-    clear_last_lines.assert_called_once_with(3)
-    assert (app_instance.pending_full_clear, app_instance.pending_clear_lines) == (False, 0)
-
-
-def test_show_report_handles_missing_and_cached_report() -> None:
-    """Test case."""
-    app_instance = app.PolishPitConsoleApp()
-    with patch("src.app.questionary.text") as text:
-        app_instance.show_report()
-    text.assert_not_called()
-
-    app_instance.tax_report = TaxReport({2025: TaxRecord(trade_revenue=1.0)})
-    question = SimpleNamespace()
-    with (
-        patch.object(app_instance, "_print_tax_summary", return_value=2),
-        patch("src.app.questionary.text", return_value=question),
-        patch.object(app, "_bind_escape_back", side_effect=lambda q: q) as bind,
-        patch.object(app, "_ask", return_value="__back__") as ask,
-    ):
-        app_instance.show_report()
-    assert getattr(question, "_block_typed_input") is True
-    assert (bind.call_count, ask.call_count) == (1, 1)
-    assert (app_instance.pending_full_clear, app_instance.pending_clear_lines) == (True, 0)
-
-    sale_line = (
-        "12/31/2025 Sale RS; SalePrice: \x1b[31m$200\x1b[0m -> \x1b[32m$20\x1b[0m; "
-        "Quantity: \x1b[31m2\x1b[0m -> \x1b[32m20\x1b[0m"
-    )
-    deposit_line = (
-        "01/01/2025 Deposit ESPP; PurchasePrice: \x1b[31m$100\x1b[0m -> \x1b[32m$10\x1b[0m; "
-        "Quantity: \x1b[31m1\x1b[0m -> \x1b[32m10\x1b[0m"
-    )
-    source = "Charles Schwab Employee Sponsored"
-    app_instance.report_messages = [(source, sale_line), (source, deposit_line)]
-    with patch.object(app.sys, "stdout", new=io.StringIO()) as out:
-        printed_lines = _call_method(app_instance, "_print_tax_summary")
-    output = out.getvalue()
-    assert (
-        "Charles Schwab Employee Sponsored" in output
-        and "  - Deposit ESPP" in output
-        and "  - PurchasePrice:" in output
-    )
-    assert output.find("01/01/2025") < output.find("12/31/2025")
-    assert printed_lines == output.count("\n")
-
-
-def test_main_dispatches_selected_commands_and_exits() -> None:
-    """Test case."""
-    with patch.object(
-        app, "_load_registered_entries", return_value=[cast(app.RegisteredTaxReportEntry, {})]
-    ):
-        with patch.object(
-            app, "_ask", side_effect=["register", "ls", "rm", "report", "show", "exit"]
-        ):
-            with patch.object(app.PolishPitConsoleApp, "register") as register:
-                with patch.object(app.PolishPitConsoleApp, "ls") as ls:
-                    with patch.object(app.PolishPitConsoleApp, "rm") as rm:
-                        with patch.object(app.PolishPitConsoleApp, "report") as report:
-                            with patch.object(
-                                app.PolishPitConsoleApp, "show_report"
-                            ) as show_report:
-                                with pytest.raises(SystemExit):
-                                    app.main()
-    register.assert_called_once()
-    ls.assert_called_once()
-    rm.assert_called_once()
-    report.assert_called_once()
-    show_report.assert_called_once()
-
-
-def test_main_disables_registry_actions_when_registry_is_empty() -> None:
-    """Test case."""
-    with patch.object(app, "_load_registered_entries", return_value=[]):
-        with patch("src.app.questionary.select", return_value=object()) as select:
-            with patch.object(app, "_ask", return_value="exit"):
-                with pytest.raises(SystemExit):
-                    app.main()
-    choices = select.call_args.kwargs["choices"]
-    titles = [choice.title for choice in choices]
-    assert titles == [
-        "Register tax reporter",
-        "List tax reporters",
-        "Remove tax reporters",
-        "Prepare tax report",
-        "Show tax report",
-        "Exit",
-    ]
-    disabled_map = {choice.title: choice.disabled for choice in choices}
-    assert disabled_map["Register tax reporter"] is None
-    assert disabled_map["List tax reporters"] == "No registered tax reporters"
-    assert disabled_map["Remove tax reporters"] == "No registered tax reporters"
-    assert disabled_map["Prepare tax report"] == "No registered tax reporters"
-    assert disabled_map["Show tax report"] == "No prepared report in this session"
-    assert disabled_map["Exit"] is None
-
-
-def test_main_disables_registry_actions_when_registry_has_only_invalid_entries() -> None:
-    """Test case."""
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        with patch.dict(app.os.environ, {caches.REGISTRY_DIR_ENV_VAR: tmp_dir}, clear=False):
-            registry = Path(tmp_dir)
-            registry.mkdir(parents=True, exist_ok=True)
-            (registry / "1.yaml").write_text(_encode("path: /tmp/source.csv\n"), encoding="utf-8")
-            with pytest.raises(KeyError, match="tax_report_key"):
+def test_show_returns_without_ui_call_when_tax_report_is_missing() -> None:
+    """show() should call UI print/wait helpers with current state."""
+    app_instance = app.App()
+    with patch.object(app.ui, "print_tax_report") as print_tax_report:
+        with patch.object(app.ui, "wait_for_back_navigation") as wait_for_back:
+            app_instance.show()
+    print_tax_report.assert_called_once_with(None, [])
+    wait_for_back.assert_called_once()
+
+
+def test_show_delegates_to_ui_with_tax_report_and_logs() -> None:
+    """show() should delegate printing and back wait to UI helpers."""
+    app_instance = app.App()
+    app_instance.tax_report = _report(trade_revenue=1234.5)
+    app_instance.logs = TaxReportLogs()
+    app_instance.logs.add(datetime(2025, 1, 1).date(), "log one")
+    app_instance.logs.add(datetime(2025, 1, 2).date(), "log two")
+    with patch.object(app.ui, "print_tax_report") as print_tax_report:
+        with patch.object(app.ui, "wait_for_back_navigation") as wait_for_back:
+            app_instance.show()
+    print_tax_report.assert_called_once_with(app_instance.tax_report, app_instance.logs)
+    wait_for_back.assert_called_once()
+
+
+def test_reset_clears_report_messages() -> None:
+    """reset() should clear transient in-session report state."""
+    app_instance = app.App()
+    app_instance.tax_report = _report(trade_revenue=999.0)
+    app_instance.logs = TaxReportLogs()
+    app_instance.logs.add(datetime(2025, 1, 1).date(), "cached report")
+
+    app_instance._reset()
+
+    assert app_instance.tax_report is None
+    assert not app_instance.logs
+
+
+def test_main_runs_app_loop_once() -> None:
+    """main() should create app instance and run interactive loop."""
+    instance = app.App()
+    with patch.object(app, "App", return_value=instance):
+        with patch.object(instance, "run") as run:
+            app.main()
+    run.assert_called_once()
+
+
+def test_main_handles_keyboard_interrupt_with_reset_and_exit_zero() -> None:
+    """main() should delegate Ctrl-C handling to app.exit_app()."""
+    instance = app.App()
+    with patch.object(app, "App", return_value=instance):
+        with patch.object(instance, "run", side_effect=KeyboardInterrupt):
+            with patch.object(instance, "exit_app") as exit_app:
                 app.main()
+    exit_app.assert_called_once()
 
 
-def test_main_exits_zero_on_keyboard_interrupt() -> None:
-    """Test case."""
-    with patch.object(app, "_ask", side_effect=KeyboardInterrupt):
-        with patch.object(app.sys, "exit", side_effect=SystemExit) as exit_mock:
-            with pytest.raises(SystemExit):
+def test_main_does_not_call_sys_exit_on_normal_return() -> None:
+    """main() should return normally when run loop exits without exception."""
+    instance = app.App()
+    with patch.object(app, "App", return_value=instance):
+        with patch.object(instance, "run"):
+            with patch.object(app.sys, "exit") as exit_:
                 app.main()
-    exit_mock.assert_called_once_with(0)
+    exit_.assert_not_called()
+
+
+def test_exit_app_resets_state_and_exits_with_zero_status() -> None:
+    """exit_app() should clear state and exit process with status code 0."""
+    app_instance = app.App()
+    app_instance.tax_report = _report(trade_revenue=1.0)
+    app_instance.logs = TaxReportLogs()
+    app_instance.logs.add(datetime(2025, 1, 1).date(), "log")
+
+    with patch.object(app_instance, "_reset") as reset:
+        with patch.object(app.sys, "exit") as exit_:
+            app_instance.exit_app()
+
+    reset.assert_called_once()
+    exit_.assert_called_once_with(0)

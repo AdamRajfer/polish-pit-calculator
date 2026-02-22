@@ -1,10 +1,41 @@
 """Core tax data models shared by all tax reporters."""
 
-from abc import ABC, abstractmethod
+from bisect import bisect_right
+from collections.abc import Callable
 from dataclasses import dataclass, field, fields
-from pathlib import Path
+from datetime import date
+from typing import TypedDict
 
 import pandas as pd
+
+PromptValidator = Callable[[str], bool | str]
+
+
+class TaxReportLogs(list[str]):
+    """Log sink that keeps entries ordered by source transaction date."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._dates: list[date] = []
+
+    def add(self, log_date: date, log_message: str) -> None:
+        """Insert one log message at chronological position."""
+        insert_at = bisect_right(self._dates, log_date)
+        self._dates.insert(insert_at, log_date)
+        super().insert(insert_at, log_message)
+
+    def clear(self) -> None:
+        """Clear both rendered messages and their date index."""
+        self._dates.clear()
+        super().clear()
+
+
+class LogChange(TypedDict):
+    """Structured one-field change used in alignment/update logs."""
+
+    name: str
+    before: object
+    after: object
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +227,14 @@ class TaxReport:
                 tax_report[year] = self[year] + other[year]
         return tax_report
 
+    def __radd__(self, other: object) -> "TaxReport":
+        """Support builtin sum() by accepting the default integer zero seed."""
+        if other == 0:
+            return self
+        if isinstance(other, TaxReport):
+            return self + other
+        return NotImplemented
+
     def __getitem__(self, year: int) -> TaxRecord:
         """Return a year record, defaulting to an empty TaxRecord."""
         return self.year_to_tax_record.get(year, TaxRecord())
@@ -225,52 +264,3 @@ class TaxReport:
             .map(lambda value: f"{value:,.2f}")
         )
         return pit_label_df.join(df)
-
-
-class TaxReporter(ABC):
-    """Abstract base class for all tax reporters."""
-
-    def __init__(self) -> None:
-        """Initialize optional alignment log shared by reporters."""
-        self.alignment_change_log: list[str] = []
-
-    @abstractmethod
-    def generate(self) -> TaxReport:
-        """Build and return yearly tax report data."""
-
-    @classmethod
-    def validate_file_path(cls, _path: Path) -> bool | str:
-        """Validate reporter-specific file input path."""
-        return True
-
-
-class CsvTaxReporter(TaxReporter, ABC):
-    """Base class for CSV-backed file reporters."""
-
-    def __init__(self, *files: Path) -> None:
-        """Store provided CSV file paths."""
-        super().__init__()
-        self.files = files
-
-    @classmethod
-    def validate_file_path(cls, path: Path) -> bool | str:
-        """Validate CSV reporter file extension."""
-        if path.suffix.lower() != ".csv":
-            return "Only .csv files are supported."
-        return True
-
-
-class JsonTaxReporter(TaxReporter, ABC):
-    """Base class for JSON-backed file reporters."""
-
-    def __init__(self, *files: Path) -> None:
-        """Store provided JSON file paths."""
-        super().__init__()
-        self.files = files
-
-    @classmethod
-    def validate_file_path(cls, path: Path) -> bool | str:
-        """Validate JSON reporter file extension."""
-        if path.suffix.lower() != ".json":
-            return "Only .json files are supported."
-        return True

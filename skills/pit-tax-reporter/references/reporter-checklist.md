@@ -7,6 +7,11 @@ Use this checklist for any reporter/model/parser changes in this repository.
 1. Reporter returns `TaxReport` from `generate()`.
 2. Year keys and values are deterministic.
 3. `TaxRecord` fields map correctly to PIT rows and tax semantics.
+4. Reporter metadata contract remains stable:
+- `name()`
+- `validators()`
+- `to_entry_data()`
+- registry class path under `polish_pit_calculator.tax_reporters.*`
 
 ## Input Parsing
 

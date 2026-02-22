@@ -4,14 +4,16 @@ import json
 import tempfile
 from datetime import date, timedelta
 from pathlib import Path
+from typing import cast
 from unittest import TestCase
 from unittest.mock import patch
 
 import pandas as pd
 from pandas.testing import assert_frame_equal
 
-from src.config import TaxRecord
-from src.schwab import SchwabEmployeeSponsoredTaxReporter, _ScaleContext, _SplitParams
+from polish_pit_calculator.config import TaxRecord, TaxReportLogs
+from polish_pit_calculator.tax_reporters import CharlesSchwabEmployeeSponsoredTaxReporter
+from polish_pit_calculator.tax_reporters.schwab import _ScaleContext, _SplitParams
 
 
 def _json_buf(payload: object) -> Path:
@@ -20,13 +22,13 @@ def _json_buf(payload: object) -> Path:
         return Path(file.name)
 
 
-class TestSchwabEmployeeSponsoredTaxReporter(TestCase):
+class TestCharlesSchwabEmployeeSponsoredTaxReporter(TestCase):
     """Test Schwab parsing, loading and yearly aggregation logic."""
 
     def test_parse_amount_columns_parses_sign_amount_and_currency(self) -> None:
         """Test money parsing sets signed floats and inferred currencies."""
-        self.assertTrue(SchwabEmployeeSponsoredTaxReporter.validate_file_path(Path("x.json")))
-        reporter = SchwabEmployeeSponsoredTaxReporter(_json_buf({}))
+        reporter = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf({}))
+        self.assertEqual(CharlesSchwabEmployeeSponsoredTaxReporter.extension(), ".json")
         df = pd.DataFrame(
             [
                 {
@@ -75,7 +77,7 @@ class TestSchwabEmployeeSponsoredTaxReporter(TestCase):
 
     def test_parse_amount_columns_handles_missing_columns(self) -> None:
         """Test missing money columns are created and parsed as zero."""
-        reporter = SchwabEmployeeSponsoredTaxReporter(_json_buf({}))
+        reporter = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf({}))
         df = pd.DataFrame([{"Amount": "$2.00"}])
         actual = getattr(reporter, "_parse_amount_columns")(df)
         required_columns = {"Amount", "SalePrice", "PurchasePrice", "Currency"}
@@ -87,7 +89,7 @@ class TestSchwabEmployeeSponsoredTaxReporter(TestCase):
 
     def test_parse_amount_columns_keeps_existing_currency(self) -> None:
         """Test prefilled row currency is not overwritten by parsed values."""
-        reporter = SchwabEmployeeSponsoredTaxReporter(_json_buf({}))
+        reporter = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf({}))
         df = pd.DataFrame(
             [
                 {
@@ -104,13 +106,16 @@ class TestSchwabEmployeeSponsoredTaxReporter(TestCase):
         actual = getattr(reporter, "_parse_amount_columns")(df)
         assert actual.iloc[0]["Currency"] == "GBP"
 
-    @patch("src.schwab.get_exchange_rate", return_value=2.0)
+    @patch(
+        "polish_pit_calculator.tax_reporters.schwab.ExchangeRatesCache.get_exchange_rate",
+        return_value=2.0,
+    )
     def test_generate_handles_all_supported_actions(
         self,
         _rate: object,
     ) -> None:
         """Test yearly aggregation for deposit, sale, income and fee actions."""
-        reporter = SchwabEmployeeSponsoredTaxReporter(_json_buf({}))
+        reporter = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf({}))
         df = pd.DataFrame(
             [
                 {
@@ -170,7 +175,7 @@ class TestSchwabEmployeeSponsoredTaxReporter(TestCase):
 
     def test_generate_raises_for_unknown_action(self) -> None:
         """Test unsupported action names raise clear error."""
-        reporter = SchwabEmployeeSponsoredTaxReporter(_json_buf({}))
+        reporter = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf({}))
         df = pd.DataFrame(
             [
                 {
@@ -181,13 +186,16 @@ class TestSchwabEmployeeSponsoredTaxReporter(TestCase):
             ]
         )
         with patch.object(reporter, "_load_report", return_value=df):
-            with patch("src.schwab.get_exchange_rate", return_value=1.0):
+            with patch(
+                "polish_pit_calculator.tax_reporters.schwab.ExchangeRatesCache.get_exchange_rate",
+                return_value=1.0,
+            ):
                 with self.assertRaisesRegex(ValueError, "Unknown action"):
                     reporter.generate()
 
     def test_flatten_transaction_handles_missing_details_and_type_fallback(self) -> None:
         """Test flattening creates one row and defaults type to description."""
-        reporter = SchwabEmployeeSponsoredTaxReporter(_json_buf({}))
+        reporter = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf({}))
         transaction: dict[str, object] = {
             "Date": "01/01/2025",
             "Action": "Sale",
@@ -218,7 +226,7 @@ class TestSchwabEmployeeSponsoredTaxReporter(TestCase):
 
     def test_flatten_transaction_ignores_invalid_detail_items(self) -> None:
         """Test malformed detail rows are ignored and fallback row is created."""
-        reporter = SchwabEmployeeSponsoredTaxReporter(_json_buf({}))
+        reporter = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf({}))
         transaction: dict[str, object] = {
             "Date": "01/01/2025",
             "Action": "Sale",
@@ -236,7 +244,7 @@ class TestSchwabEmployeeSponsoredTaxReporter(TestCase):
 
     def test_flatten_transaction_keeps_rs_deposit_purchase_empty_and_splits_sale_fee(self) -> None:
         """Test RS deposit keeps zero basis and multi-lot sale fee assignment."""
-        reporter = SchwabEmployeeSponsoredTaxReporter(_json_buf({}))
+        reporter = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf({}))
         deposit: dict[str, object] = {
             "Date": "01/01/2025",
             "Action": "Deposit",
@@ -297,8 +305,8 @@ class TestSchwabEmployeeSponsoredTaxReporter(TestCase):
                 },
             ]
         }
-        reporter = SchwabEmployeeSponsoredTaxReporter(_json_buf(payload))
-        actual = getattr(reporter, "_load_report")().reset_index(drop=True)
+        reporter = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf(payload))
+        actual = getattr(reporter, "_load_report")([]).reset_index(drop=True)
 
         expected = pd.DataFrame(
             [
@@ -367,24 +375,26 @@ class TestSchwabEmployeeSponsoredTaxReporter(TestCase):
                 "invalid-transaction",
             ]
         }
-        reporter = SchwabEmployeeSponsoredTaxReporter(
-            _json_buf(["not-a-dict"]),
-            _json_buf({"bad": "shape"}),
-            _json_buf(payload_valid),
-        )
+        reporter_non_dict = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf(["not-a-dict"]))
+        assert getattr(reporter_non_dict, "_load_report")([]).empty
 
-        actual = getattr(reporter, "_load_report")().reset_index(drop=True)
+        reporter_bad_shape = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf({"bad": "shape"}))
+        assert getattr(reporter_bad_shape, "_load_report")([]).empty
+
+        reporter = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf(payload_valid))
+
+        actual = getattr(reporter, "_load_report")([]).reset_index(drop=True)
         assert len(actual.index) == 1
         assert (actual.iloc[0]["Action"], actual.iloc[0]["Amount"]) == ("Dividend", 1.5)
         with patch.object(
             reporter, "_align_and_validate_payload", return_value={"Transactions": "bad"}
         ):
-            assert getattr(reporter, "_load_report")().empty
+            assert getattr(reporter, "_load_report")([]).empty
 
     def test_load_report_returns_empty_for_empty_transactions(self) -> None:
         """Test empty JSON transaction list yields empty dataframe."""
-        reporter = SchwabEmployeeSponsoredTaxReporter(_json_buf({"Transactions": []}))
-        actual = getattr(reporter, "_load_report")()
+        reporter = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf({"Transactions": []}))
+        actual = getattr(reporter, "_load_report")([])
         assert actual.empty
 
     def test_load_report_runs_alignment_before_flatten(self) -> None:
@@ -431,16 +441,19 @@ class TestSchwabEmployeeSponsoredTaxReporter(TestCase):
                 },
             ]
         }
-        reporter = SchwabEmployeeSponsoredTaxReporter(_json_buf(payload))
+        reporter = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf(payload))
 
-        actual = getattr(reporter, "_load_report")().reset_index(drop=True)
+        logs = TaxReportLogs()
+        actual = getattr(reporter, "_load_report")(logs).reset_index(drop=True)
         assert actual.iloc[0]["Quantity"] == 10
         assert actual.iloc[0]["SalePrice"] == 58.0
-        log_lines = reporter.alignment_change_log
+        log_lines = logs
         assert any("Shares:" in line for line in log_lines) and any(
             "Quantity" in line for line in log_lines
         )
-        assert any("\x1b[31m" in line and "\x1b[32m" in line for line in log_lines)
+        assert all(
+            "\x1b[36m" in line and "\x1b[95m" in line and "\x1b[33m" in line for line in log_lines
+        )
 
     def test_align_and_validate_payload_raises_on_validation_errors(self) -> None:
         """Test validation errors from aligner are surfaced to caller."""
@@ -486,10 +499,10 @@ class TestSchwabEmployeeSponsoredTaxReporter(TestCase):
                 },
             ]
         }
-        reporter = SchwabEmployeeSponsoredTaxReporter(_json_buf(payload))
+        reporter = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf(payload))
 
         with self.assertRaisesRegex(ValueError, "sale amount mismatch"):
-            getattr(reporter, "_align_and_validate_payload")(payload)
+            getattr(reporter, "_align_and_validate_payload")(payload, TaxReportLogs())
 
 
 class TestSchwabAlignmentHelpers(TestCase):
@@ -504,19 +517,21 @@ class TestSchwabAlignmentHelpers(TestCase):
 
     def test_align_transaction_guard_paths(self) -> None:
         """Cover guarded exits in transaction and detail alignment helpers."""
-        reporter = SchwabEmployeeSponsoredTaxReporter(_json_buf({}))
+        reporter = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf({}))
         align_tx = getattr(reporter, "_align_transaction_before_split")
+        logs = TaxReportLogs()
 
-        assert getattr(reporter, "_align_and_validate_payload")({"Transactions": "bad"}) == {
+        assert getattr(reporter, "_align_and_validate_payload")({"Transactions": "bad"}, logs) == {
             "Transactions": "bad"
         }
-        assert align_tx("bad", self._context(), frozenset({"Sale"})) is False
-        assert align_tx({"Action": "Dividend"}, self._context(), frozenset({"Sale"})) is False
+        assert align_tx("bad", self._context(), frozenset({"Sale"}), logs) is False
+        assert align_tx({"Action": "Dividend"}, self._context(), frozenset({"Sale"}), logs) is False
         assert (
             align_tx(
                 {"Action": "Sale", "Date": "06/10/2024", "TransactionDetails": []},
                 self._context(),
                 frozenset({"Sale"}),
+                logs,
             )
             is False
         )
@@ -525,6 +540,7 @@ class TestSchwabAlignmentHelpers(TestCase):
                 {"Action": "Sale", "Date": "01/10/2024", "TransactionDetails": "bad"},
                 self._context(),
                 frozenset({"Sale"}),
+                logs,
             )
             is False
         )
@@ -538,35 +554,101 @@ class TestSchwabAlignmentHelpers(TestCase):
                 },
                 self._context(default_scale_when_unknown=False),
                 frozenset({"Sale"}),
+                logs,
             )
             is False
         )
-        reporter.alignment_change_log = []
+        logs = TaxReportLogs()
         empty_detail_tx = {
             "Action": "Sale",
             "Date": "01/10/2024",
             "Quantity": "0",
             "TransactionDetails": [{"Details": {}}],
         }
-        assert align_tx(empty_detail_tx, self._context(), frozenset({"Sale"})) is True
-        assert not reporter.alignment_change_log
-        reporter.alignment_change_log = []
-        no_qty_change_tx = {
+        assert align_tx(empty_detail_tx, self._context(), frozenset({"Sale"}), logs) is True
+        assert not logs
+        logs = TaxReportLogs()
+        missing_type_tx = {
             "Action": "Sale",
             "Date": "01/10/2024",
             "Quantity": "0",
             "TransactionDetails": [{"Details": {"SalePrice": "$100.00"}}],
         }
-        assert align_tx(no_qty_change_tx, self._context(), frozenset({"Sale"})) is True
-        assert any("SalePrice" in line for line in reporter.alignment_change_log) and not any(
-            "Quantity" in line for line in reporter.alignment_change_log
+        assert align_tx(missing_type_tx, self._context(), frozenset({"Sale"}), logs) is True
+        assert any("SalePrice" in line for line in logs)
+
+        logs = TaxReportLogs()
+        no_qty_change_tx = {
+            "Action": "Sale",
+            "Date": "01/10/2024",
+            "Quantity": "0",
+            "TransactionDetails": [{"Details": {"Type": "RS", "SalePrice": "$100.00"}}],
+        }
+        assert align_tx(no_qty_change_tx, self._context(), frozenset({"Sale"}), logs) is True
+        log_lines = logs
+        assert any("SalePrice" in line for line in log_lines) and not any(
+            "Quantity" in line for line in log_lines
+        )
+        logs = TaxReportLogs()
+        deposit_qty_only_tx = {
+            "Action": "Deposit",
+            "Date": "01/10/2024",
+            "Description": "RS",
+            "Quantity": "2",
+            "TransactionDetails": [{"Details": {"Type": "RS"}}],
+        }
+        assert (
+            align_tx(
+                deposit_qty_only_tx,
+                self._context(),
+                frozenset({"Deposit"}),
+                logs,
+            )
+            is True
+        )
+        assert any(
+            "Deposit RS" in line
+            and "Quantity:" in line
+            and "\x1b[31m2\x1b[0m" in line
+            and "\x1b[32m20\x1b[0m" in line
+            for line in logs
         )
         detail_rows = [1, {"Details": "bad"}, {"Details": {}}]
         assert list(getattr(reporter, "_iter_detail_dicts")(detail_rows)) == [{}]
 
+    def test_align_and_validate_payload_scales_and_logs_pre_split_deposits(self) -> None:
+        """Pre-split deposits should be aligned and logged even with unknown references."""
+        reporter = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf({}))
+        payload: dict[str, object] = {
+            "Transactions": [
+                {
+                    "Action": "Deposit",
+                    "Date": "01/10/2024",
+                    "Description": "RS",
+                    "Quantity": "2",
+                    "TransactionDetails": [{"Details": {"VestFairMarketValue": "$100.00"}}],
+                }
+            ]
+        }
+        logs = TaxReportLogs()
+        with (
+            patch.object(
+                reporter, "_detect_split_params", return_value=(date(2024, 6, 10), 10, False)
+            ),
+            patch.object(
+                reporter, "_build_reference_context", return_value=({}, {}, {}, None, None)
+            ),
+            patch.object(reporter, "_raise_alignment_validation_errors", return_value=None),
+        ):
+            aligned = getattr(reporter, "_align_and_validate_payload")(payload, logs)
+
+        aligned_tx = cast(dict[str, object], cast(list[object], aligned["Transactions"])[0])
+        assert aligned_tx["Quantity"] == "20"
+        assert any("Deposit" in line and "Quantity" in line for line in logs)
+
     def test_quantity_update_and_validation_raise_paths(self) -> None:
         """Cover quantity updates and basis-error raising path."""
-        reporter = SchwabEmployeeSponsoredTaxReporter(_json_buf({}))
+        reporter = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf({}))
         update_qty = getattr(reporter, "_update_scaled_transaction_quantity")
 
         deposit_tx = {"Action": "Deposit", "Quantity": "2"}
@@ -628,7 +710,7 @@ class TestSchwabAlignmentHelpers(TestCase):
 
     def test_split_detection_from_grouped_transactions(self) -> None:
         """Detects split params from grouped pre/post reference values."""
-        reporter = SchwabEmployeeSponsoredTaxReporter(_json_buf({}))
+        reporter = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf({}))
         transactions = self._grouped_split_transactions()
         groups = getattr(reporter, "_collect_scale_groups")(transactions)
         assert ("vest", "01/01/2023") in groups
@@ -641,7 +723,7 @@ class TestSchwabAlignmentHelpers(TestCase):
 
     def test_split_detection_from_sale_windows(self) -> None:
         """Covers sale-window detection, transient windows, and edge thresholds."""
-        reporter = SchwabEmployeeSponsoredTaxReporter(_json_buf({}))
+        reporter = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf({}))
         base = date(2024, 1, 1)
         short_transactions: list[object] = [
             {
@@ -716,7 +798,7 @@ class TestSchwabAlignmentHelpers(TestCase):
 
     def test_fallback_split_helpers_and_series_parsing(self) -> None:
         """Exercises fallback split inference and sale-price series parsing guards."""
-        reporter = SchwabEmployeeSponsoredTaxReporter(_json_buf({}))
+        reporter = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf({}))
         base = date(2024, 1, 1)
         assert (
             getattr(reporter, "_candidate_from_group")(
@@ -776,7 +858,7 @@ class TestSchwabAlignmentHelpers(TestCase):
 
     def test_parse_and_format_helpers(self) -> None:
         """Validates parsing/formatting helpers for numbers, money, and dates."""
-        reporter = SchwabEmployeeSponsoredTaxReporter(_json_buf({}))
+        reporter = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf({}))
         assert getattr(reporter, "_factor_from_ratio")(1.0) is None
         assert getattr(reporter, "_factor_from_ratio")(1.79) is None
         assert getattr(reporter, "_factor_from_ratio")(2.6) is None
@@ -806,7 +888,7 @@ class TestSchwabAlignmentHelpers(TestCase):
 
     def test_reference_context_and_add_reference_helpers(self) -> None:
         """Builds and updates reference maps used by the scaling heuristics."""
-        reporter = SchwabEmployeeSponsoredTaxReporter(_json_buf({}))
+        reporter = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf({}))
         reference_context = getattr(reporter, "_build_reference_context")(
             [
                 "bad",
@@ -866,7 +948,7 @@ class TestSchwabAlignmentHelpers(TestCase):
 
     def test_score_and_scaling_helpers(self) -> None:
         """Checks scoring decisions and low-level quantity/price scaling behavior."""
-        reporter = SchwabEmployeeSponsoredTaxReporter(_json_buf({}))
+        reporter = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf({}))
         score_context = self._score_context()
         assert getattr(reporter, "_should_scale_detail")({}, "Dividend", score_context) is False
         with patch.object(reporter, "_detail_scale_scores", return_value=None):
@@ -930,7 +1012,7 @@ class TestSchwabAlignmentHelpers(TestCase):
 
     def test_sum_and_validation_helpers(self) -> None:
         """Covers share summation and sale-amount validation edge cases."""
-        reporter = SchwabEmployeeSponsoredTaxReporter(_json_buf({}))
+        reporter = CharlesSchwabEmployeeSponsoredTaxReporter(_json_buf({}))
         summed = getattr(reporter, "_sum_sale_shares")(
             [1, {"Details": "bad"}, {"Details": {"Shares": ""}}, {"Details": {"Shares": "2"}}],
             "1",

@@ -10,8 +10,10 @@ from typing import cast
 
 import pandas as pd
 
-from src.config import JsonTaxReporter, TaxRecord, TaxReport
-from src.utils import get_exchange_rate
+from polish_pit_calculator.caches import ExchangeRatesCache
+from polish_pit_calculator.config import LogChange, TaxRecord, TaxReport, TaxReportLogs
+from polish_pit_calculator.registry import TaxReporterRegistry
+from polish_pit_calculator.tax_reporters.file import FileTaxReporter
 
 _SHARE_FIELDS = ("Shares", "NetSharesDeposited", "SharesWithheld", "SharesSold")
 _PRICE_FIELDS = (
@@ -68,11 +70,23 @@ class _ReferenceCollectors:
     post_sale_prices: list[float]
 
 
-class SchwabEmployeeSponsoredTaxReporter(JsonTaxReporter):
+@TaxReporterRegistry.register
+class CharlesSchwabEmployeeSponsoredTaxReporter(FileTaxReporter):
     """Build tax report from Schwab employee-sponsored account exports."""
 
-    def generate(self) -> TaxReport:
-        df = self._load_report()
+    @classmethod
+    def name(cls) -> str:
+        """Return reporter name shown in app choices."""
+        return "Charles Schwab Employee Sponsored"
+
+    @classmethod
+    def extension(cls) -> str:
+        """Return accepted input file extension."""
+        return ".json"
+
+    def generate(self, logs: TaxReportLogs | None = None) -> TaxReport:
+        log_sink = TaxReportLogs() if logs is None else logs
+        df = self._load_report(log_sink)
         remaining: dict[str, list[pd.Series]] = defaultdict(list)
         tax_report = TaxReport()
         for _, row in df.iterrows():
@@ -81,11 +95,13 @@ class SchwabEmployeeSponsoredTaxReporter(JsonTaxReporter):
                 for _ in range(int(row["Quantity"])):
                     remaining[row["Description"]].append(row)
             elif row["Action"] == "Sale":
-                exc_rate = get_exchange_rate(row["Currency"], row["Date"])
+                exc_rate = ExchangeRatesCache.get_exchange_rate(row["Currency"], row["Date"])
                 tax_record = TaxRecord(trade_cost=row["FeesAndCommissions"] * exc_rate)
                 for _ in range(int(row["Shares"])):
                     sold_row = remaining[row["Type"]].pop(0)
-                    sold_exc_rate = get_exchange_rate(sold_row["Currency"], sold_row["Date"])
+                    sold_exc_rate = ExchangeRatesCache.get_exchange_rate(
+                        sold_row["Currency"], sold_row["Date"]
+                    )
                     tax_record += TaxRecord(
                         trade_revenue=row["SalePrice"] * exc_rate,
                         trade_cost=sold_row["PurchasePrice"] * sold_exc_rate,
@@ -94,15 +110,15 @@ class SchwabEmployeeSponsoredTaxReporter(JsonTaxReporter):
             elif row["Action"] == "Lapse":
                 pass
             elif row["Action"] == "Dividend":
-                exc_rate = get_exchange_rate(row["Currency"], row["Date"])
+                exc_rate = ExchangeRatesCache.get_exchange_rate(row["Currency"], row["Date"])
                 tax_record = TaxRecord(foreign_interest=row["Amount"] * exc_rate)
                 tax_report += TaxReport({year: tax_record})
             elif row["Action"] == "Tax Withholding":
-                exc_rate = get_exchange_rate(row["Currency"], row["Date"])
+                exc_rate = ExchangeRatesCache.get_exchange_rate(row["Currency"], row["Date"])
                 tax_record = TaxRecord(foreign_interest_withholding_tax=-row["Amount"] * exc_rate)
                 tax_report += TaxReport({year: tax_record})
             elif row["Action"] == "Wire Transfer":
-                exc_rate = get_exchange_rate(row["Currency"], row["Date"])
+                exc_rate = ExchangeRatesCache.get_exchange_rate(row["Currency"], row["Date"])
                 tax_record = TaxRecord(trade_cost=-row["FeesAndCommissions"] * exc_rate)
                 tax_report += TaxReport({year: tax_record})
             else:
@@ -178,25 +194,20 @@ class SchwabEmployeeSponsoredTaxReporter(JsonTaxReporter):
             rows.append(row)
         return rows
 
-    def _load_report(self) -> pd.DataFrame:
-        self.alignment_change_log = []
+    def _load_report(self, logs: TaxReportLogs) -> pd.DataFrame:
         rows: list[dict[str, object]] = []
-        for json_file in self.files:
-            with Path(json_file).open("r", encoding="utf-8") as path_file:
-                payload = json.load(path_file)
-            if not isinstance(payload, dict):
-                continue
+        with Path(self.path).open("r", encoding="utf-8") as path_file:
+            payload = json.load(path_file)
+        if isinstance(payload, dict):
             transactions_raw = payload.get("Transactions")
-            if not isinstance(transactions_raw, list):
-                continue
-            payload = self._align_and_validate_payload(payload)
-            aligned_transactions = payload.get("Transactions")
-            if not isinstance(aligned_transactions, list):
-                continue
-            for transaction in aligned_transactions:
-                if not isinstance(transaction, dict):
-                    continue
-                rows.extend(self._flatten_transaction(transaction))
+            if isinstance(transactions_raw, list):
+                payload = self._align_and_validate_payload(payload, logs)
+                aligned_transactions = payload.get("Transactions")
+                if isinstance(aligned_transactions, list):
+                    for transaction in aligned_transactions:
+                        if not isinstance(transaction, dict):
+                            continue
+                        rows.extend(self._flatten_transaction(transaction))
         df = pd.DataFrame(rows)
         if df.empty:
             return df
@@ -208,7 +219,11 @@ class SchwabEmployeeSponsoredTaxReporter(JsonTaxReporter):
         df = self._parse_amount_columns(df)
         return df.sort_values("Date", kind="mergesort").reset_index(drop=True)
 
-    def _align_and_validate_payload(self, payload: dict[str, object]) -> dict[str, object]:
+    def _align_and_validate_payload(
+        self,
+        payload: dict[str, object],
+        logs: TaxReportLogs,
+    ) -> dict[str, object]:
         aligned = json.loads(json.dumps(payload))
         transactions = aligned.get("Transactions")
         if not isinstance(transactions, list):
@@ -219,9 +234,13 @@ class SchwabEmployeeSponsoredTaxReporter(JsonTaxReporter):
         split = _SplitParams(*detected)
         reference_context = self._build_reference_context(transactions, split.split_date)
         sale_policy = _AlignPolicy(frozenset({"Sale"}), True, True)
-        lot_policy = _AlignPolicy(frozenset({"Deposit", "Lapse"}), False, False)
-        self._align_transactions_for_actions(transactions, split, reference_context, sale_policy)
-        self._align_transactions_for_actions(transactions, split, reference_context, lot_policy)
+        lot_policy = _AlignPolicy(frozenset({"Deposit", "Lapse"}), True, False)
+        self._align_transactions_for_actions(
+            transactions, split, reference_context, sale_policy, logs
+        )
+        self._align_transactions_for_actions(
+            transactions, split, reference_context, lot_policy, logs
+        )
         self._raise_alignment_validation_errors(transactions)
         return aligned
 
@@ -231,10 +250,16 @@ class SchwabEmployeeSponsoredTaxReporter(JsonTaxReporter):
         split: _SplitParams,
         reference_context: ReferenceContext,
         policy: _AlignPolicy,
+        logs: TaxReportLogs,
     ) -> None:
         scale_context = _ScaleContext(split, reference_context, policy.default_scale_when_unknown)
         for tx in transactions:
-            scaled = self._align_transaction_before_split(tx, scale_context, policy.actions)
+            scaled = self._align_transaction_before_split(
+                tx,
+                scale_context,
+                policy.actions,
+                logs,
+            )
             if scaled and policy.enrich_references and isinstance(tx, dict):
                 self._update_reference_context_from_transaction(tx, reference_context)
 
@@ -243,81 +268,76 @@ class SchwabEmployeeSponsoredTaxReporter(JsonTaxReporter):
         transaction: object,
         scale_context: _ScaleContext,
         actions: frozenset[str],
+        logs: TaxReportLogs,
     ) -> bool:
         if not isinstance(transaction, dict):
             return False
-        action = transaction.get("Action")
-        if not isinstance(action, str) or action not in actions:
+        if not isinstance(action := transaction.get("Action"), str) or action not in actions:
             return False
-        tx_date = self._parse_tx_date(transaction.get("Date"))
-        if tx_date is None or tx_date >= scale_context.split.split_date:
+        log_date = self._parse_tx_date(transaction.get("Date"))
+        if log_date is None or log_date >= scale_context.split.split_date:
             return False
-        detail_rows_obj = transaction.get("TransactionDetails")
-        if not isinstance(detail_rows_obj, list):
+        if not isinstance(detail_rows_obj := transaction.get("TransactionDetails"), list):
             return False
-        detail_dicts = list(self._iter_detail_dicts(detail_rows_obj))
-        tx_instrument = (
+        log_detail_fallback = (
             cast(str, transaction.get("Description"))
             if isinstance(transaction.get("Description"), str)
-            else "UNKNOWN"
+            else action
         )
-        tx_label, quantity_before = transaction.get("Date"), transaction.get("Quantity")
-        log_start = len(self.alignment_change_log)
-        if not self._scale_detail_rows(
-            detail_dicts,
-            action,
-            scale_context,
-            (tx_label, tx_instrument),
-        ):
+        split_factor = scale_context.split.factor
+        split_reverse = scale_context.split.is_reverse
+        scaled_any = False
+        log_details: list[str] = []
+        log_changes: list[list[LogChange]] = []
+        for detail in self._iter_detail_dicts(detail_rows_obj):
+            if not self._should_scale_detail(detail, action, scale_context):
+                continue
+            before = detail.copy()
+            self._scale_detail(detail, split_factor, split_reverse)
+            changes: list[LogChange] = [
+                {"name": key, "before": before.get(key), "after": detail.get(key)}
+                for key in (*_SHARE_FIELDS, *_PRICE_FIELDS)
+                if before.get(key) != detail.get(key)
+            ]
+            if changes:
+                detail_value = (
+                    cast(str, detail.get("Type"))
+                    if isinstance(detail.get("Type"), str)
+                    else log_detail_fallback
+                )
+                log_details.append(detail_value)
+                log_changes.append(changes)
+            scaled_any = True
+        if not scaled_any:
             return False
-        split_factor, split_reverse = scale_context.split.factor, scale_context.split.is_reverse
+        quantity_before = transaction.get("Quantity")
         self._update_scaled_transaction_quantity(
             transaction,
             detail_rows_obj,
             split_factor,
             split_reverse,
         )
-        if (
-            quantity_before != transaction.get("Quantity")
-            and len(self.alignment_change_log) > log_start
-        ):
-            quantity_change = (
-                f"Quantity: \x1b[31m{quantity_before}\x1b[0m -> "
-                f"\x1b[32m{transaction.get('Quantity')}\x1b[0m"
+        quantity_after = transaction.get("Quantity")
+        if quantity_before != quantity_after:
+            quantity_change: LogChange = {
+                "name": "Quantity",
+                "before": quantity_before,
+                "after": quantity_after,
+            }
+            if log_changes:
+                log_changes[-1].append(quantity_change)
+            else:
+                log_details.append(log_detail_fallback)
+                log_changes.append([quantity_change])
+        for detail, changes in zip(log_details, log_changes):
+            self.update_logs(
+                log_date=log_date,
+                action=action,
+                detail=detail,
+                changes=changes,
+                logs=logs,
             )
-            self.alignment_change_log[-1] = f"{self.alignment_change_log[-1]}; {quantity_change}"
         return True
-
-    def _scale_detail_rows(
-        self,
-        detail_rows: list[dict[str, object]],
-        action: str,
-        scale_context: _ScaleContext,
-        tx_identity: tuple[object, str],
-    ) -> bool:
-        scaled_any = False
-        for detail in detail_rows:
-            if not self._should_scale_detail(detail, action, scale_context):
-                continue
-            before = detail.copy()
-            self._scale_detail(detail, scale_context.split.factor, scale_context.split.is_reverse)
-            changes: list[str] = []
-            for key in (*_SHARE_FIELDS, *_PRICE_FIELDS):
-                if before.get(key) == detail.get(key):
-                    continue
-                changes.append(
-                    f"{key}: \x1b[31m{before.get(key)}\x1b[0m -> \x1b[32m{detail.get(key)}\x1b[0m"
-                )
-            if changes:
-                detail_type = detail.get("Type")
-                detail_value = (
-                    detail_type if isinstance(detail_type, str) and detail_type else tx_identity[1]
-                )
-                self.alignment_change_log.append(
-                    f"{tx_identity[0]} {action} {detail_value}; " + "; ".join(changes)
-                )
-            scaled_any = True
-        return scaled_any
 
     def _iter_detail_dicts(self, detail_rows: list[object]):
         for detail_row in detail_rows:
@@ -602,7 +622,6 @@ class SchwabEmployeeSponsoredTaxReporter(JsonTaxReporter):
             subscription_values=defaultdict(list),
             post_sale_prices=[],
         )
-
         for tx in transactions:
             if not isinstance(tx, dict):
                 continue
@@ -614,7 +633,6 @@ class SchwabEmployeeSponsoredTaxReporter(JsonTaxReporter):
                 continue
             for detail in self._iter_detail_dicts(detail_rows_obj):
                 self._append_reference_values(detail, collectors)
-
         vest_map = {key: median(values) for key, values in collectors.vest_values.items() if values}
         purchase_map = {
             key: median(values) for key, values in collectors.purchase_values.items() if values

@@ -2,31 +2,28 @@
 
 import pandas as pd
 
-from src.config import CsvTaxReporter, TaxRecord, TaxReport
-from src.utils import get_exchange_rate
+from polish_pit_calculator.caches import ExchangeRatesCache
+from polish_pit_calculator.config import TaxRecord, TaxReport
+from polish_pit_calculator.registry import TaxReporterRegistry
+from polish_pit_calculator.tax_reporters.file import FileTaxReporter
 
 
-class CoinbaseTaxReporter(CsvTaxReporter):
+@TaxReporterRegistry.register
+class CoinbaseTaxReporter(FileTaxReporter):
     """Build a tax report from one or more Coinbase exports."""
 
-    def generate(self) -> TaxReport:
-        """Generate yearly crypto revenue and cost summary."""
-        df = self._load_report()
-        tax_report = TaxReport()
-        for year, df_year in df.groupby("Year"):
-            tax_report[year] = TaxRecord(
-                crypto_revenue=df_year["Income"].sum(),
-                crypto_cost=df_year["Cost"].sum(),
-            )
-        return tax_report
+    @classmethod
+    def name(cls):
+        return "Coinbase"
 
-    def _load_report(self) -> pd.DataFrame:
-        """Load, normalize and convert Coinbase CSV rows to PLN values."""
-        reports = []
-        for csv_file in self.files:
-            report = pd.read_csv(csv_file, skiprows=3, parse_dates=["Timestamp"])
-            reports.append(report)
-        df = pd.concat(reports, ignore_index=True)
+    @classmethod
+    def extension(cls) -> str:
+        """Return accepted input file extension."""
+        return ".csv"
+
+    def generate(self, logs: list[str] | None = None) -> TaxReport:
+        """Generate yearly crypto revenue and cost summary."""
+        df = pd.read_csv(self.path, skiprows=3, parse_dates=["Timestamp"])
         df["Timestamp"] = df["Timestamp"].dt.date
         df["Year"] = df["Timestamp"].apply(lambda x: x.year)
         df = df[df["Transaction Type"].isin(["Advanced Trade Buy", "Advanced Trade Sell"])]
@@ -43,7 +40,7 @@ class CoinbaseTaxReporter(CsvTaxReporter):
             sell["Cost"] += sell["Fees and/or Spread"]
         df = pd.concat([buy, sell])
         exc_rate = df.apply(
-            lambda x: get_exchange_rate(
+            lambda x: ExchangeRatesCache.get_exchange_rate(
                 currency=x["Price Currency"],
                 date_=x["Timestamp"],
             ),
@@ -51,4 +48,10 @@ class CoinbaseTaxReporter(CsvTaxReporter):
         )
         df["Cost"] *= exc_rate
         df["Income"] *= exc_rate
-        return df
+        tax_report = TaxReport()
+        for year, df_year in df.groupby("Year"):
+            tax_report[year] = TaxRecord(
+                crypto_revenue=df_year["Income"].sum(),
+                crypto_cost=df_year["Cost"].sum(),
+            )
+        return tax_report
