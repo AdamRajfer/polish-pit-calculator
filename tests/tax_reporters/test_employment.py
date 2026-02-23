@@ -36,3 +36,19 @@ class TestEmploymentTaxReporter(TestCase):
                 }
             ),
         )
+
+    def test_details_omits_zero_amount_fields(self) -> None:
+        """Test details skip zero-value fields while keeping year and non-zero values."""
+        reporter = EmploymentTaxReporter(2025, 1.0, 0.0, 3.0, 0.0)
+        self.assertEqual(
+            reporter.details,
+            "Year: 2025 Employment Revenue: 1.00 Social Security Contributions: 3.00",
+        )
+
+    def test_details_can_skip_revenue_and_social_security_when_zero(self) -> None:
+        """Test details keep remaining non-zero values when selected fields are zero."""
+        reporter = EmploymentTaxReporter(2025, 0.0, 2.0, 0.0, 4.0)
+        self.assertEqual(
+            reporter.details,
+            "Year: 2025 Employment Cost: 2.00 Donations: 4.00",
+        )

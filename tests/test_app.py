@@ -466,7 +466,13 @@ def test_build_employment_reporter_parses_year_and_amounts() -> None:
     assert reporter.employment_cost == 2.2
     assert reporter.social_security_contributions == 3.3
     assert reporter.donations == 4.0
-    assert reporter.details == "Year: 2025"
+    assert reporter.details == (
+        "Year: 2025 "
+        "Employment Revenue: 1.00 "
+        "Employment Cost: 2.20 "
+        "Social Security Contributions: 3.30 "
+        "Donations: 4.00"
+    )
 
 
 def test_build_employment_reporter_year_validator_rules() -> None:

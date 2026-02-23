@@ -47,7 +47,18 @@ class EmploymentTaxReporter(TaxReporter):
     @property
     def details(self) -> str:
         """Return registry details row for employment reporter."""
-        return f"Year: {self.year}"
+        parts = [f"Year: {self.year}"]
+        if self.employment_revenue != 0:
+            parts.append(f"Employment Revenue: {self.employment_revenue:,.2f}")
+        if self.employment_cost != 0:
+            parts.append(f"Employment Cost: {self.employment_cost:,.2f}")
+        if self.social_security_contributions != 0:
+            parts.append(
+                "Social Security Contributions: " f"{self.social_security_contributions:,.2f}"
+            )
+        if self.donations != 0:
+            parts.append(f"Donations: {self.donations:,.2f}")
+        return " ".join(parts)
 
     def generate(self, logs: list[str] | None = None) -> TaxReport:
         """Build one-year tax report entry from stored employment values."""

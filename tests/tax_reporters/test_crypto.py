@@ -25,7 +25,15 @@ class TestCryptoTaxReporter(TestCase):
     def test_details_and_entry_payload_are_built_from_constructor_values(self) -> None:
         """Test details and serialization payload for prompt reporter."""
         reporter = CryptoTaxReporter(2025, 10.0, 4.0, 1.0)
-        self.assertEqual(reporter.details, "Year: 2025")
+        self.assertEqual(
+            reporter.details,
+            (
+                "Year: 2025 "
+                "Crypto Revenue: 10.00 "
+                "Crypto Cost: 4.00 "
+                "Crypto Cost Excess From Previous Years: 1.00"
+            ),
+        )
         self.assertEqual(
             reporter.to_entry_data(),
             {
@@ -34,6 +42,19 @@ class TestCryptoTaxReporter(TestCase):
                 "crypto_cost": 4.0,
                 "crypto_cost_excess_from_previous_years": 1.0,
             },
+        )
+
+    def test_details_omits_zero_amount_fields(self) -> None:
+        """Test details skip zero-value fields while keeping year and non-zero values."""
+        reporter = CryptoTaxReporter(2025, 0.0, 4.0, 0.0)
+        self.assertEqual(reporter.details, "Year: 2025 Crypto Cost: 4.00")
+
+    def test_details_can_skip_crypto_cost_when_zero(self) -> None:
+        """Test details keep remaining non-zero values when crypto cost is zero."""
+        reporter = CryptoTaxReporter(2025, 10.0, 0.0, 1.0)
+        self.assertEqual(
+            reporter.details,
+            "Year: 2025 Crypto Revenue: 10.00 Crypto Cost Excess From Previous Years: 1.00",
         )
 
     def test_generate_builds_one_year_report(self) -> None:

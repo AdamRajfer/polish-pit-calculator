@@ -44,7 +44,17 @@ class CryptoTaxReporter(TaxReporter):
     @property
     def details(self) -> str:
         """Return registry details row for crypto reporter."""
-        return f"Year: {self.year}"
+        parts = [f"Year: {self.year}"]
+        if self.crypto_revenue != 0:
+            parts.append(f"Crypto Revenue: {self.crypto_revenue:,.2f}")
+        if self.crypto_cost != 0:
+            parts.append(f"Crypto Cost: {self.crypto_cost:,.2f}")
+        if self.crypto_cost_excess_from_previous_years != 0:
+            parts.append(
+                "Crypto Cost Excess From Previous Years: "
+                f"{self.crypto_cost_excess_from_previous_years:,.2f}"
+            )
+        return " ".join(parts)
 
     def generate(self, logs: list[str] | None = None) -> TaxReport:
         """Build one-year tax report entry from stored crypto values."""

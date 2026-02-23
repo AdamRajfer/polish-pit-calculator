@@ -44,7 +44,16 @@ class TradeTaxReporter(TaxReporter):
     @property
     def details(self) -> str:
         """Return registry details row for trade reporter."""
-        return f"Year: {self.year}"
+        parts = [f"Year: {self.year}"]
+        if self.trade_revenue != 0:
+            parts.append(f"Trade Revenue: {self.trade_revenue:,.2f}")
+        if self.trade_cost != 0:
+            parts.append(f"Trade Cost: {self.trade_cost:,.2f}")
+        if self.trade_loss_from_previous_years != 0:
+            parts.append(
+                f"Trade Loss From Previous Years: {self.trade_loss_from_previous_years:,.2f}"
+            )
+        return " ".join(parts)
 
     def generate(self, logs: list[str] | None = None) -> TaxReport:
         """Build one-year tax report entry from stored trade values."""
